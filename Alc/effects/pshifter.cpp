@@ -20,6 +20,10 @@
 
 #include "config.h"
 
+#ifdef HAVE_SSE_INTRINSICS
+#include <emmintrin.h>
+#endif
+
 #include <cmath>
 #include <cstdlib>
 #include <array>
@@ -48,13 +52,17 @@ using complex_d = std::complex<double>;
 
 inline int double2int(double d)
 {
-#if ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) && \
-     !defined(__SSE2_MATH__)) || (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP < 2)
-    ALint sign, shift;
-    ALint64 mant;
+#if defined(HAVE_SSE_INTRINSICS)
+    return _mm_cvttsd_si32(_mm_set_sd(d));
+
+#elif ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) && \
+       !defined(__SSE2_MATH__)) || (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP < 2)
+
+    int sign, shift;
+    int64_t mant;
     union {
-        ALdouble d;
-        ALint64 i64;
+        double d;
+        int64_t i64;
     } conv;
 
     conv.d = d;
@@ -65,26 +73,26 @@ inline int double2int(double d)
     if(UNLIKELY(shift >= 63 || shift < -52))
         return 0;
 
-    mant = (conv.i64&I64(0xfffffffffffff)) | I64(0x10000000000000);
+    mant = (conv.i64&0xfffffffffffff_i64) | 0x10000000000000_i64;
     if(LIKELY(shift < 0))
-        return (ALint)(mant >> -shift) * sign;
-    return (ALint)(mant << shift) * sign;
+        return (int)(mant >> -shift) * sign;
+    return (int)(mant << shift) * sign;
 
 #else
 
-    return (ALint)d;
+    return static_cast<int>(d);
 #endif
 }
 
 /* Define a Hann window, used to filter the STFT input and output. */
 /* Making this constexpr seems to require C++14. */
-std::array<ALdouble,STFT_SIZE> InitHannWindow(void)
+std::array<ALdouble,STFT_SIZE> InitHannWindow()
 {
     std::array<ALdouble,STFT_SIZE> ret;
     /* Create lookup table of the Hann window for the desired size, i.e. HIL_SIZE */
     for(ALsizei i{0};i < STFT_SIZE>>1;i++)
     {
-        ALdouble val = std::sin(M_PI * (ALdouble)i / (ALdouble)(STFT_SIZE-1));
+        ALdouble val = std::sin(al::MathDefs<double>::Pi() * i / ALdouble{STFT_SIZE-1});
         ret[i] = ret[STFT_SIZE-1-i] = val * val;
     }
     return ret;
@@ -117,7 +125,7 @@ inline complex_d polar2rect(const ALphasor &number)
 { return std::polar<double>(number.Amplitude, number.Phase); }
 
 
-struct ALpshifterState final : public EffectState {
+struct PshifterState final : public EffectState {
     /* Effect parameters */
     ALsizei mCount;
     ALsizei mPitchShiftI;
@@ -143,20 +151,20 @@ struct ALpshifterState final : public EffectState {
     ALfloat mTargetGains[MAX_OUTPUT_CHANNELS];
 
 
-    ALboolean deviceUpdate(ALCdevice *device) override;
-    void update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props) override;
-    void process(ALsizei samplesToDo, const ALfloat (*RESTRICT samplesIn)[BUFFERSIZE], ALfloat (*RESTRICT samplesOut)[BUFFERSIZE], ALsizei numChannels) override;
+    ALboolean deviceUpdate(const ALCdevice *device) override;
+    void update(const ALCcontext *context, const ALeffectslot *slot, const EffectProps *props, const EffectTarget target) override;
+    void process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei numInput, const al::span<FloatBufferLine> samplesOut) override;
 
-    DEF_NEWDEL(ALpshifterState)
+    DEF_NEWDEL(PshifterState)
 };
 
-ALboolean ALpshifterState::deviceUpdate(ALCdevice *device)
+ALboolean PshifterState::deviceUpdate(const ALCdevice *device)
 {
     /* (Re-)initializing parameters and clear the buffers. */
     mCount       = FIFO_LATENCY;
     mPitchShiftI = FRACTIONONE;
     mPitchShift  = 1.0f;
-    mFreqPerBin  = device->Frequency / (ALfloat)STFT_SIZE;
+    mFreqPerBin  = device->Frequency / static_cast<ALfloat>(STFT_SIZE);
 
     std::fill(std::begin(mInFIFO),          std::end(mInFIFO),          0.0f);
     std::fill(std::begin(mOutFIFO),         std::end(mOutFIFO),         0.0f);
@@ -173,42 +181,41 @@ ALboolean ALpshifterState::deviceUpdate(ALCdevice *device)
     return AL_TRUE;
 }
 
-void ALpshifterState::update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props)
+void PshifterState::update(const ALCcontext* UNUSED(context), const ALeffectslot *slot, const EffectProps *props, const EffectTarget target)
 {
-    const ALCdevice *device = context->Device;
-    ALfloat coeffs[MAX_AMBI_COEFFS];
-    float pitch;
-
-    pitch = std::pow(2.0f,
-        (ALfloat)(props->Pshifter.CoarseTune*100 + props->Pshifter.FineTune) / 1200.0f
-    );
+    const float pitch{std::pow(2.0f,
+        static_cast<ALfloat>(props->Pshifter.CoarseTune*100 + props->Pshifter.FineTune) / 1200.0f
+    )};
     mPitchShiftI = fastf2i(pitch*FRACTIONONE);
     mPitchShift  = mPitchShiftI * (1.0f/FRACTIONONE);
 
-    CalcAngleCoeffs(0.0f, 0.0f, 0.0f, coeffs);
-    ComputePanGains(&device->Dry, coeffs, slot->Params.Gain, mTargetGains);
+    ALfloat coeffs[MAX_AMBI_CHANNELS];
+    CalcDirectionCoeffs({0.0f, 0.0f, -1.0f}, 0.0f, coeffs);
+
+    mOutTarget = target.Main->Buffer;
+    ComputePanGains(target.Main, coeffs, slot->Params.Gain, mTargetGains);
 }
 
-void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT SamplesIn)[BUFFERSIZE], ALfloat (*RESTRICT SamplesOut)[BUFFERSIZE], ALsizei NumChannels)
+void PshifterState::process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei /*numInput*/, const al::span<FloatBufferLine> samplesOut)
 {
     /* Pitch shifter engine based on the work of Stephan Bernsee.
      * http://blogs.zynaptiq.com/bernsee/pitch-shifting-using-the-ft/
      */
 
-    static constexpr ALdouble expected{M_PI*2.0 / OVERSAMP};
+    static constexpr ALdouble expected{al::MathDefs<double>::Tau() / OVERSAMP};
     const ALdouble freq_per_bin{mFreqPerBin};
     ALfloat *RESTRICT bufferOut{mBufferOut};
     ALsizei count{mCount};
 
-    for(ALsizei i{0};i < SamplesToDo;)
+    for(ALsizei i{0};i < samplesToDo;)
     {
         do {
             /* Fill FIFO buffer with samples data */
-            mInFIFO[count] = SamplesIn[0][i];
+            mInFIFO[count] = samplesIn[0][i];
             bufferOut[i] = mOutFIFO[count - FIFO_LATENCY];
 
             count++;
-        } while(++i < SamplesToDo && count < STFT_SIZE);
+        } while(++i < samplesToDo && count < STFT_SIZE);
 
         /* Check whether FIFO buffer is filled */
         if(count < STFT_SIZE) break;
@@ -223,7 +230,7 @@ void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
 
         /* ANALYSIS */
         /* Apply FFT to FFTbuffer data */
-        complex_fft(mFFTbuffer, STFT_SIZE, -1.0);
+        complex_fft(mFFTbuffer, -1.0);
 
         /* Analyze the obtained data. Since the real FFT is symmetric, only
          * STFT_HALF_SIZE+1 samples are needed.
@@ -237,8 +244,8 @@ void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
             double tmp{(component.Phase - mLastPhase[k]) - k*expected};
 
             /* Map delta phase into +/- Pi interval */
-            int qpd{double2int(tmp / M_PI)};
-            tmp -= M_PI * (qpd + (qpd%2));
+            int qpd{double2int(tmp / al::MathDefs<double>::Pi())};
+            tmp -= al::MathDefs<double>::Pi() * (qpd + (qpd%2));
 
             /* Get deviation from bin frequency from the +/- Pi interval */
             tmp /= expected;
@@ -295,7 +302,7 @@ void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
             mFFTbuffer[k] = complex_d{};
 
         /* Apply iFFT to buffer data */
-        complex_fft(mFFTbuffer, STFT_SIZE, 1.0);
+        complex_fft(mFFTbuffer, 1.0);
 
         /* Windowing and add to output */
         for(ALsizei k{0};k < STFT_SIZE;k++)
@@ -304,7 +311,7 @@ void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
 
         /* Shift accumulator, input & output FIFO */
         ALsizei j, k;
-        for(k = 0;k < STFT_STEP;k++) mOutFIFO[k] = (ALfloat)mOutputAccum[k];
+        for(k = 0;k < STFT_STEP;k++) mOutFIFO[k] = static_cast<ALfloat>(mOutputAccum[k]);
         for(j = 0;k < STFT_SIZE;k++,j++) mOutputAccum[j] = mOutputAccum[k];
         for(;j < STFT_SIZE;j++) mOutputAccum[j] = 0.0;
         for(k = 0;k < FIFO_LATENCY;k++)
@@ -313,39 +320,18 @@ void ALpshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
     mCount = count;
 
     /* Now, mix the processed sound data to the output. */
-    MixSamples(bufferOut, NumChannels, SamplesOut, mCurrentGains, mTargetGains,
-               maxi(SamplesToDo, 512), 0, SamplesToDo);
-}
-
-} // namespace
-
-struct PshifterStateFactory final : public EffectStateFactory {
-    EffectState *create() override;
-};
-
-EffectState *PshifterStateFactory::create()
-{ return new ALpshifterState{}; }
-
-EffectStateFactory *PshifterStateFactory_getFactory(void)
-{
-    static PshifterStateFactory PshifterFactory{};
-    return &PshifterFactory;
+    MixSamples(bufferOut, samplesOut, mCurrentGains, mTargetGains, maxi(samplesToDo, 512), 0,
+        samplesToDo);
 }
 
 
-void ALpshifter_setParamf(ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALfloat UNUSED(val))
-{
-    alSetError( context, AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param );
-}
+void Pshifter_setParamf(EffectProps*, ALCcontext *context, ALenum param, ALfloat)
+{ alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param); }
+void Pshifter_setParamfv(EffectProps*, ALCcontext *context, ALenum param, const ALfloat*)
+{ alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float-vector property 0x%04x", param); }
 
-void ALpshifter_setParamfv(ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, const ALfloat *UNUSED(vals))
+void Pshifter_setParami(EffectProps *props, ALCcontext *context, ALenum param, ALint val)
 {
-    alSetError( context, AL_INVALID_ENUM, "Invalid pitch shifter float-vector property 0x%04x", param );
-}
-
-void ALpshifter_setParami(ALeffect *effect, ALCcontext *context, ALenum param, ALint val)
-{
-    ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_PITCH_SHIFTER_COARSE_TUNE:
@@ -364,40 +350,56 @@ void ALpshifter_setParami(ALeffect *effect, ALCcontext *context, ALenum param, A
             alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter integer property 0x%04x", param);
     }
 }
-void ALpshifter_setParamiv(ALeffect *effect, ALCcontext *context, ALenum param, const ALint *vals)
-{
-    ALpshifter_setParami(effect, context, param, vals[0]);
-}
+void Pshifter_setParamiv(EffectProps *props, ALCcontext *context, ALenum param, const ALint *vals)
+{ Pshifter_setParami(props, context, param, vals[0]); }
 
-void ALpshifter_getParami(const ALeffect *effect, ALCcontext *context, ALenum param, ALint *val)
+void Pshifter_getParami(const EffectProps *props, ALCcontext *context, ALenum param, ALint *val)
 {
-    const ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_PITCH_SHIFTER_COARSE_TUNE:
-            *val = (ALint)props->Pshifter.CoarseTune;
+            *val = props->Pshifter.CoarseTune;
             break;
         case AL_PITCH_SHIFTER_FINE_TUNE:
-            *val = (ALint)props->Pshifter.FineTune;
+            *val = props->Pshifter.FineTune;
             break;
 
         default:
             alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter integer property 0x%04x", param);
     }
 }
-void ALpshifter_getParamiv(const ALeffect *effect, ALCcontext *context, ALenum param, ALint *vals)
+void Pshifter_getParamiv(const EffectProps *props, ALCcontext *context, ALenum param, ALint *vals)
+{ Pshifter_getParami(props, context, param, vals); }
+
+void Pshifter_getParamf(const EffectProps*, ALCcontext *context, ALenum param, ALfloat*)
+{ alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param); }
+void Pshifter_getParamfv(const EffectProps*, ALCcontext *context, ALenum param, ALfloat*)
+{ alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float vector-property 0x%04x", param); }
+
+DEFINE_ALEFFECT_VTABLE(Pshifter);
+
+
+struct PshifterStateFactory final : public EffectStateFactory {
+    EffectState *create() override;
+    EffectProps getDefaultProps() const noexcept override;
+    const EffectVtable *getEffectVtable() const noexcept override { return &Pshifter_vtable; }
+};
+
+EffectState *PshifterStateFactory::create()
+{ return new PshifterState{}; }
+
+EffectProps PshifterStateFactory::getDefaultProps() const noexcept
 {
-    ALpshifter_getParami(effect, context, param, vals);
+    EffectProps props{};
+    props.Pshifter.CoarseTune = AL_PITCH_SHIFTER_DEFAULT_COARSE_TUNE;
+    props.Pshifter.FineTune   = AL_PITCH_SHIFTER_DEFAULT_FINE_TUNE;
+    return props;
 }
 
-void ALpshifter_getParamf(const ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALfloat *UNUSED(val))
-{
-    alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param);
-}
+} // namespace
 
-void ALpshifter_getParamfv(const ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALfloat *UNUSED(vals))
+EffectStateFactory *PshifterStateFactory_getFactory()
 {
-    alSetError(context, AL_INVALID_ENUM, "Invalid pitch shifter float vector-property 0x%04x", param);
+    static PshifterStateFactory PshifterFactory{};
+    return &PshifterFactory;
 }
-
-DEFINE_ALEFFECT_VTABLE(ALpshifter);

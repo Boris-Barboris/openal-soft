@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <functional>
 
 #include "alMain.h"
 #include "alu.h"
@@ -45,7 +46,7 @@
 #include "compat.h"
 
 /* MinGW-w64 needs this for some unknown reason now. */
-typedef const WAVEFORMATEX *LPCWAVEFORMATEX;
+using LPCWAVEFORMATEX = const WAVEFORMATEX*;
 #include <dsound.h>
 
 
@@ -98,38 +99,6 @@ HRESULT (WINAPI *pDirectSoundCaptureEnumerateW)(LPDSENUMCALLBACKW pDSEnumCallbac
 #endif
 
 
-bool DSoundLoad(void)
-{
-#ifdef HAVE_DYNLOAD
-    if(!ds_handle)
-    {
-        ds_handle = LoadLib("dsound.dll");
-        if(!ds_handle)
-        {
-            ERR("Failed to load dsound.dll\n");
-            return false;
-        }
-
-#define LOAD_FUNC(f) do {                                                     \
-    p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(ds_handle, #f));        \
-    if(!p##f)                                                                 \
-    {                                                                         \
-        CloseLib(ds_handle);                                                  \
-        ds_handle = nullptr;                                                  \
-        return false;                                                         \
-    }                                                                         \
-} while(0)
-        LOAD_FUNC(DirectSoundCreate);
-        LOAD_FUNC(DirectSoundEnumerateW);
-        LOAD_FUNC(DirectSoundCaptureCreate);
-        LOAD_FUNC(DirectSoundCaptureEnumerateW);
-#undef LOAD_FUNC
-    }
-#endif
-    return true;
-}
-
-
 #define MAX_UPDATES 128
 
 struct DevMap {
@@ -158,7 +127,7 @@ BOOL CALLBACK DSoundEnumDevices(GUID *guid, const WCHAR *desc, const WCHAR* UNUS
     if(!guid)
         return TRUE;
 
-    auto& devices = *reinterpret_cast<al::vector<DevMap>*>(data);
+    auto& devices = *static_cast<al::vector<DevMap>*>(data);
     const std::string basename{DEVNAME_HEAD + wstr_to_utf8(desc)};
 
     int count{1};
@@ -184,118 +153,94 @@ BOOL CALLBACK DSoundEnumDevices(GUID *guid, const WCHAR *desc, const WCHAR* UNUS
 }
 
 
-struct ALCdsoundPlayback final : public ALCbackend {
-    IDirectSound       *DS{nullptr};
-    IDirectSoundBuffer *PrimaryBuffer{nullptr};
-    IDirectSoundBuffer *Buffer{nullptr};
-    IDirectSoundNotify *Notifies{nullptr};
-    HANDLE             NotifyEvent{nullptr};
+struct DSoundPlayback final : public BackendBase {
+    DSoundPlayback(ALCdevice *device) noexcept : BackendBase{device} { }
+    ~DSoundPlayback() override;
 
-    std::atomic<ALenum> mKillNow{AL_TRUE};
+    int mixerProc();
+
+    ALCenum open(const ALCchar *name) override;
+    ALCboolean reset() override;
+    ALCboolean start() override;
+    void stop() override;
+
+    IDirectSound       *mDS{nullptr};
+    IDirectSoundBuffer *mPrimaryBuffer{nullptr};
+    IDirectSoundBuffer *mBuffer{nullptr};
+    IDirectSoundNotify *mNotifies{nullptr};
+    HANDLE             mNotifyEvent{nullptr};
+
+    std::atomic<bool> mKillNow{true};
     std::thread mThread;
+
+    DEF_NEWDEL(DSoundPlayback)
 };
 
-int ALCdsoundPlayback_mixerProc(ALCdsoundPlayback *self);
-
-void ALCdsoundPlayback_Construct(ALCdsoundPlayback *self, ALCdevice *device);
-void ALCdsoundPlayback_Destruct(ALCdsoundPlayback *self);
-ALCenum ALCdsoundPlayback_open(ALCdsoundPlayback *self, const ALCchar *name);
-ALCboolean ALCdsoundPlayback_reset(ALCdsoundPlayback *self);
-ALCboolean ALCdsoundPlayback_start(ALCdsoundPlayback *self);
-void ALCdsoundPlayback_stop(ALCdsoundPlayback *self);
-DECLARE_FORWARD2(ALCdsoundPlayback, ALCbackend, ALCenum, captureSamples, void*, ALCuint)
-DECLARE_FORWARD(ALCdsoundPlayback, ALCbackend, ALCuint, availableSamples)
-DECLARE_FORWARD(ALCdsoundPlayback, ALCbackend, ClockLatency, getClockLatency)
-DECLARE_FORWARD(ALCdsoundPlayback, ALCbackend, void, lock)
-DECLARE_FORWARD(ALCdsoundPlayback, ALCbackend, void, unlock)
-DECLARE_DEFAULT_ALLOCATORS(ALCdsoundPlayback)
-
-DEFINE_ALCBACKEND_VTABLE(ALCdsoundPlayback);
-
-
-void ALCdsoundPlayback_Construct(ALCdsoundPlayback *self, ALCdevice *device)
+DSoundPlayback::~DSoundPlayback()
 {
-    new (self) ALCdsoundPlayback{};
-    ALCbackend_Construct(STATIC_CAST(ALCbackend, self), device);
-    SET_VTABLE2(ALCdsoundPlayback, ALCbackend, self);
-}
+    if(mNotifies)
+        mNotifies->Release();
+    mNotifies = nullptr;
+    if(mBuffer)
+        mBuffer->Release();
+    mBuffer = nullptr;
+    if(mPrimaryBuffer)
+        mPrimaryBuffer->Release();
+    mPrimaryBuffer = nullptr;
 
-void ALCdsoundPlayback_Destruct(ALCdsoundPlayback *self)
-{
-    if(self->Notifies)
-        self->Notifies->Release();
-    self->Notifies = nullptr;
-    if(self->Buffer)
-        self->Buffer->Release();
-    self->Buffer = nullptr;
-    if(self->PrimaryBuffer)
-        self->PrimaryBuffer->Release();
-    self->PrimaryBuffer = nullptr;
-
-    if(self->DS)
-        self->DS->Release();
-    self->DS = nullptr;
-    if(self->NotifyEvent)
-        CloseHandle(self->NotifyEvent);
-    self->NotifyEvent = nullptr;
-
-    ALCbackend_Destruct(STATIC_CAST(ALCbackend, self));
-    self->~ALCdsoundPlayback();
+    if(mDS)
+        mDS->Release();
+    mDS = nullptr;
+    if(mNotifyEvent)
+        CloseHandle(mNotifyEvent);
+    mNotifyEvent = nullptr;
 }
 
 
-FORCE_ALIGN int ALCdsoundPlayback_mixerProc(ALCdsoundPlayback *self)
+FORCE_ALIGN int DSoundPlayback::mixerProc()
 {
-    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
-
     SetRTPriority();
     althrd_setname(MIXER_THREAD_NAME);
 
-    IDirectSoundBuffer *const Buffer{self->Buffer};
-
     DSBCAPS DSBCaps{};
     DSBCaps.dwSize = sizeof(DSBCaps);
-    HRESULT err{Buffer->GetCaps(&DSBCaps)};
+    HRESULT err{mBuffer->GetCaps(&DSBCaps)};
     if(FAILED(err))
     {
         ERR("Failed to get buffer caps: 0x%lx\n", err);
-        ALCdsoundPlayback_lock(self);
-        aluHandleDisconnect(device, "Failure retrieving playback buffer info: 0x%lx", err);
-        ALCdsoundPlayback_unlock(self);
+        aluHandleDisconnect(mDevice, "Failure retrieving playback buffer info: 0x%lx", err);
         return 1;
     }
 
-    ALsizei FrameSize{FrameSizeFromDevFmt(device->FmtChans, device->FmtType, device->mAmbiOrder)};
-    DWORD FragSize{device->UpdateSize * FrameSize};
+    ALsizei FrameSize{mDevice->frameSizeFromFmt()};
+    DWORD FragSize{mDevice->UpdateSize * FrameSize};
 
     bool Playing{false};
     DWORD LastCursor{0u};
-    Buffer->GetCurrentPosition(&LastCursor, nullptr);
-    while(!self->mKillNow.load(std::memory_order_acquire) &&
-          device->Connected.load(std::memory_order_acquire))
+    mBuffer->GetCurrentPosition(&LastCursor, nullptr);
+    while(!mKillNow.load(std::memory_order_acquire) &&
+          mDevice->Connected.load(std::memory_order_acquire))
     {
         // Get current play cursor
         DWORD PlayCursor;
-        Buffer->GetCurrentPosition(&PlayCursor, nullptr);
+        mBuffer->GetCurrentPosition(&PlayCursor, nullptr);
         DWORD avail = (PlayCursor-LastCursor+DSBCaps.dwBufferBytes) % DSBCaps.dwBufferBytes;
 
         if(avail < FragSize)
         {
             if(!Playing)
             {
-                err = Buffer->Play(0, 0, DSBPLAY_LOOPING);
+                err = mBuffer->Play(0, 0, DSBPLAY_LOOPING);
                 if(FAILED(err))
                 {
                     ERR("Failed to play buffer: 0x%lx\n", err);
-                    ALCdsoundPlayback_lock(self);
-                    aluHandleDisconnect(device, "Failure starting playback: 0x%lx", err);
-                    ALCdsoundPlayback_unlock(self);
+                    aluHandleDisconnect(mDevice, "Failure starting playback: 0x%lx", err);
                     return 1;
                 }
                 Playing = true;
             }
 
-            avail = WaitForSingleObjectEx(self->NotifyEvent, 2000, FALSE);
+            avail = WaitForSingleObjectEx(mNotifyEvent, 2000, FALSE);
             if(avail != WAIT_OBJECT_0)
                 ERR("WaitForSingleObjectEx error: 0x%lx\n", avail);
             continue;
@@ -305,40 +250,36 @@ FORCE_ALIGN int ALCdsoundPlayback_mixerProc(ALCdsoundPlayback *self)
         // Lock output buffer
         void *WritePtr1, *WritePtr2;
         DWORD WriteCnt1{0u},  WriteCnt2{0u};
-        err = Buffer->Lock(LastCursor, avail, &WritePtr1, &WriteCnt1, &WritePtr2, &WriteCnt2, 0);
+        err = mBuffer->Lock(LastCursor, avail, &WritePtr1, &WriteCnt1, &WritePtr2, &WriteCnt2, 0);
 
         // If the buffer is lost, restore it and lock
         if(err == DSERR_BUFFERLOST)
         {
             WARN("Buffer lost, restoring...\n");
-            err = Buffer->Restore();
+            err = mBuffer->Restore();
             if(SUCCEEDED(err))
             {
                 Playing = false;
                 LastCursor = 0;
-                err = Buffer->Lock(0, DSBCaps.dwBufferBytes, &WritePtr1, &WriteCnt1,
-                                   &WritePtr2, &WriteCnt2, 0);
+                err = mBuffer->Lock(0, DSBCaps.dwBufferBytes, &WritePtr1, &WriteCnt1,
+                                    &WritePtr2, &WriteCnt2, 0);
             }
         }
 
-        // Successfully locked the output buffer
         if(SUCCEEDED(err))
         {
-            // If we have an active context, mix data directly into output buffer otherwise fill with silence
-            ALCdsoundPlayback_lock(self);
-            aluMixData(device, WritePtr1, WriteCnt1/FrameSize);
-            aluMixData(device, WritePtr2, WriteCnt2/FrameSize);
-            ALCdsoundPlayback_unlock(self);
+            lock();
+            aluMixData(mDevice, WritePtr1, WriteCnt1/FrameSize);
+            if(WriteCnt2 > 0)
+                aluMixData(mDevice, WritePtr2, WriteCnt2/FrameSize);
+            unlock();
 
-            // Unlock output buffer only when successfully locked
-            Buffer->Unlock(WritePtr1, WriteCnt1, WritePtr2, WriteCnt2);
+            mBuffer->Unlock(WritePtr1, WriteCnt1, WritePtr2, WriteCnt2);
         }
         else
         {
             ERR("Buffer lock error: %#lx\n", err);
-            ALCdsoundPlayback_lock(self);
-            aluHandleDisconnect(device, "Failed to lock output buffer: 0x%lx", err);
-            ALCdsoundPlayback_unlock(self);
+            aluHandleDisconnect(mDevice, "Failed to lock output buffer: 0x%lx", err);
             return 1;
         }
 
@@ -350,10 +291,8 @@ FORCE_ALIGN int ALCdsoundPlayback_mixerProc(ALCdsoundPlayback *self)
     return 0;
 }
 
-ALCenum ALCdsoundPlayback_open(ALCdsoundPlayback *self, const ALCchar *deviceName)
+ALCenum DSoundPlayback::open(const ALCchar *name)
 {
-    ALCdevice *device{STATIC_CAST(ALCbackend, self)->mDevice};
-
     HRESULT hr;
     if(PlaybackDevices.empty())
     {
@@ -367,16 +306,16 @@ ALCenum ALCdsoundPlayback_open(ALCdsoundPlayback *self, const ALCchar *deviceNam
     }
 
     const GUID *guid{nullptr};
-    if(!deviceName && !PlaybackDevices.empty())
+    if(!name && !PlaybackDevices.empty())
     {
-        deviceName = PlaybackDevices[0].name.c_str();
+        name = PlaybackDevices[0].name.c_str();
         guid = &PlaybackDevices[0].guid;
     }
     else
     {
         auto iter = std::find_if(PlaybackDevices.cbegin(), PlaybackDevices.cend(),
-            [deviceName](const DevMap &entry) -> bool
-            { return entry.name == deviceName; }
+            [name](const DevMap &entry) -> bool
+            { return entry.name == name; }
         );
         if(iter == PlaybackDevices.cend())
             return ALC_INVALID_VALUE;
@@ -384,52 +323,50 @@ ALCenum ALCdsoundPlayback_open(ALCdsoundPlayback *self, const ALCchar *deviceNam
     }
 
     hr = DS_OK;
-    self->NotifyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if(!self->NotifyEvent) hr = E_FAIL;
+    mNotifyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if(!mNotifyEvent) hr = E_FAIL;
 
     //DirectSound Init code
     if(SUCCEEDED(hr))
-        hr = DirectSoundCreate(guid, &self->DS, nullptr);
+        hr = DirectSoundCreate(guid, &mDS, nullptr);
     if(SUCCEEDED(hr))
-        hr = self->DS->SetCooperativeLevel(GetForegroundWindow(), DSSCL_PRIORITY);
+        hr = mDS->SetCooperativeLevel(GetForegroundWindow(), DSSCL_PRIORITY);
     if(FAILED(hr))
     {
         ERR("Device init failed: 0x%08lx\n", hr);
         return ALC_INVALID_VALUE;
     }
 
-    device->DeviceName = deviceName;
+    mDevice->DeviceName = name;
     return ALC_NO_ERROR;
 }
 
-ALCboolean ALCdsoundPlayback_reset(ALCdsoundPlayback *self)
+ALCboolean DSoundPlayback::reset()
 {
-    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
+    if(mNotifies)
+        mNotifies->Release();
+    mNotifies = nullptr;
+    if(mBuffer)
+        mBuffer->Release();
+    mBuffer = nullptr;
+    if(mPrimaryBuffer)
+        mPrimaryBuffer->Release();
+    mPrimaryBuffer = nullptr;
 
-    if(self->Notifies)
-        self->Notifies->Release();
-    self->Notifies = nullptr;
-    if(self->Buffer)
-        self->Buffer->Release();
-    self->Buffer = nullptr;
-    if(self->PrimaryBuffer)
-        self->PrimaryBuffer->Release();
-    self->PrimaryBuffer = nullptr;
-
-    switch(device->FmtType)
+    switch(mDevice->FmtType)
     {
         case DevFmtByte:
-            device->FmtType = DevFmtUByte;
+            mDevice->FmtType = DevFmtUByte;
             break;
         case DevFmtFloat:
-            if((device->Flags&DEVICE_SAMPLE_TYPE_REQUEST))
+            if(mDevice->Flags.get<SampleTypeRequest>())
                 break;
             /* fall-through */
         case DevFmtUShort:
-            device->FmtType = DevFmtShort;
+            mDevice->FmtType = DevFmtShort;
             break;
         case DevFmtUInt:
-            device->FmtType = DevFmtInt;
+            mDevice->FmtType = DevFmtInt;
             break;
         case DevFmtUByte:
         case DevFmtShort:
@@ -439,37 +376,37 @@ ALCboolean ALCdsoundPlayback_reset(ALCdsoundPlayback *self)
 
     WAVEFORMATEXTENSIBLE OutputType{};
     DWORD speakers;
-    HRESULT hr{self->DS->GetSpeakerConfig(&speakers)};
+    HRESULT hr{mDS->GetSpeakerConfig(&speakers)};
     if(SUCCEEDED(hr))
     {
         speakers = DSSPEAKER_CONFIG(speakers);
-        if(!(device->Flags&DEVICE_CHANNELS_REQUEST))
+        if(!mDevice->Flags.get<ChannelsRequest>())
         {
             if(speakers == DSSPEAKER_MONO)
-                device->FmtChans = DevFmtMono;
+                mDevice->FmtChans = DevFmtMono;
             else if(speakers == DSSPEAKER_STEREO || speakers == DSSPEAKER_HEADPHONE)
-                device->FmtChans = DevFmtStereo;
+                mDevice->FmtChans = DevFmtStereo;
             else if(speakers == DSSPEAKER_QUAD)
-                device->FmtChans = DevFmtQuad;
+                mDevice->FmtChans = DevFmtQuad;
             else if(speakers == DSSPEAKER_5POINT1_SURROUND)
-                device->FmtChans = DevFmtX51;
+                mDevice->FmtChans = DevFmtX51;
             else if(speakers == DSSPEAKER_5POINT1_BACK)
-                device->FmtChans = DevFmtX51Rear;
+                mDevice->FmtChans = DevFmtX51Rear;
             else if(speakers == DSSPEAKER_7POINT1 || speakers == DSSPEAKER_7POINT1_SURROUND)
-                device->FmtChans = DevFmtX71;
+                mDevice->FmtChans = DevFmtX71;
             else
                 ERR("Unknown system speaker config: 0x%lx\n", speakers);
         }
-        device->IsHeadphones = (device->FmtChans == DevFmtStereo &&
-                                speakers == DSSPEAKER_HEADPHONE);
+        mDevice->IsHeadphones = (mDevice->FmtChans == DevFmtStereo &&
+                                 speakers == DSSPEAKER_HEADPHONE);
 
-        switch(device->FmtChans)
+        switch(mDevice->FmtChans)
         {
             case DevFmtMono:
                 OutputType.dwChannelMask = SPEAKER_FRONT_CENTER;
                 break;
             case DevFmtAmbi3D:
-                device->FmtChans = DevFmtStereo;
+                mDevice->FmtChans = DevFmtStereo;
                 /*fall-through*/
             case DevFmtStereo:
                 OutputType.dwChannelMask = SPEAKER_FRONT_LEFT |
@@ -521,62 +458,59 @@ ALCboolean ALCdsoundPlayback_reset(ALCdsoundPlayback *self)
 retry_open:
         hr = S_OK;
         OutputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-        OutputType.Format.nChannels = ChannelsFromDevFmt(device->FmtChans, device->mAmbiOrder);
-        OutputType.Format.wBitsPerSample = BytesFromDevFmt(device->FmtType) * 8;
+        OutputType.Format.nChannels = mDevice->channelsFromFmt();
+        OutputType.Format.wBitsPerSample = mDevice->bytesFromFmt() * 8;
         OutputType.Format.nBlockAlign = OutputType.Format.nChannels*OutputType.Format.wBitsPerSample/8;
-        OutputType.Format.nSamplesPerSec = device->Frequency;
+        OutputType.Format.nSamplesPerSec = mDevice->Frequency;
         OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec*OutputType.Format.nBlockAlign;
         OutputType.Format.cbSize = 0;
     }
 
-    if(OutputType.Format.nChannels > 2 || device->FmtType == DevFmtFloat)
+    if(OutputType.Format.nChannels > 2 || mDevice->FmtType == DevFmtFloat)
     {
         OutputType.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
         OutputType.Samples.wValidBitsPerSample = OutputType.Format.wBitsPerSample;
         OutputType.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-        if(device->FmtType == DevFmtFloat)
+        if(mDevice->FmtType == DevFmtFloat)
             OutputType.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
         else
             OutputType.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
-        if(self->PrimaryBuffer)
-            self->PrimaryBuffer->Release();
-        self->PrimaryBuffer = nullptr;
+        if(mPrimaryBuffer)
+            mPrimaryBuffer->Release();
+        mPrimaryBuffer = nullptr;
     }
     else
     {
-        if(SUCCEEDED(hr) && !self->PrimaryBuffer)
+        if(SUCCEEDED(hr) && !mPrimaryBuffer)
         {
             DSBUFFERDESC DSBDescription{};
             DSBDescription.dwSize = sizeof(DSBDescription);
             DSBDescription.dwFlags = DSBCAPS_PRIMARYBUFFER;
-            hr = self->DS->CreateSoundBuffer(&DSBDescription, &self->PrimaryBuffer, nullptr);
+            hr = mDS->CreateSoundBuffer(&DSBDescription, &mPrimaryBuffer, nullptr);
         }
         if(SUCCEEDED(hr))
-            hr = self->PrimaryBuffer->SetFormat(&OutputType.Format);
+            hr = mPrimaryBuffer->SetFormat(&OutputType.Format);
     }
 
     if(SUCCEEDED(hr))
     {
-        if(device->NumUpdates > MAX_UPDATES)
-        {
-            device->UpdateSize = (device->UpdateSize*device->NumUpdates +
-                                  MAX_UPDATES-1) / MAX_UPDATES;
-            device->NumUpdates = MAX_UPDATES;
-        }
+        ALuint num_updates{mDevice->BufferSize / mDevice->UpdateSize};
+        if(num_updates > MAX_UPDATES)
+            num_updates = MAX_UPDATES;
+        mDevice->BufferSize = mDevice->UpdateSize * num_updates;
 
         DSBUFFERDESC DSBDescription{};
         DSBDescription.dwSize = sizeof(DSBDescription);
         DSBDescription.dwFlags = DSBCAPS_CTRLPOSITIONNOTIFY | DSBCAPS_GETCURRENTPOSITION2 |
                                  DSBCAPS_GLOBALFOCUS;
-        DSBDescription.dwBufferBytes = device->UpdateSize * device->NumUpdates *
-                                       OutputType.Format.nBlockAlign;
+        DSBDescription.dwBufferBytes = mDevice->BufferSize * OutputType.Format.nBlockAlign;
         DSBDescription.lpwfxFormat = &OutputType.Format;
 
-        hr = self->DS->CreateSoundBuffer(&DSBDescription, &self->Buffer, nullptr);
-        if(FAILED(hr) && device->FmtType == DevFmtFloat)
+        hr = mDS->CreateSoundBuffer(&DSBDescription, &mBuffer, nullptr);
+        if(FAILED(hr) && mDevice->FmtType == DevFmtFloat)
         {
-            device->FmtType = DevFmtShort;
+            mDevice->FmtType = DevFmtShort;
             goto retry_open;
         }
     }
@@ -584,50 +518,51 @@ retry_open:
     if(SUCCEEDED(hr))
     {
         void *ptr;
-        hr = self->Buffer->QueryInterface(IID_IDirectSoundNotify, &ptr);
+        hr = mBuffer->QueryInterface(IID_IDirectSoundNotify, &ptr);
         if(SUCCEEDED(hr))
         {
-            auto Notifies = reinterpret_cast<IDirectSoundNotify*>(ptr);
-            self->Notifies = Notifies;
+            auto Notifies = static_cast<IDirectSoundNotify*>(ptr);
+            mNotifies = Notifies;
 
-            device->NumUpdates = minu(device->NumUpdates, MAX_UPDATES);
+            ALuint num_updates{mDevice->BufferSize / mDevice->UpdateSize};
+            assert(num_updates <= MAX_UPDATES);
 
             std::array<DSBPOSITIONNOTIFY,MAX_UPDATES> nots;
-            for(ALuint i{0};i < device->NumUpdates;++i)
+            for(ALuint i{0};i < num_updates;++i)
             {
-                nots[i].dwOffset = i * device->UpdateSize * OutputType.Format.nBlockAlign;
-                nots[i].hEventNotify = self->NotifyEvent;
+                nots[i].dwOffset = i * mDevice->UpdateSize * OutputType.Format.nBlockAlign;
+                nots[i].hEventNotify = mNotifyEvent;
             }
-            if(Notifies->SetNotificationPositions(device->NumUpdates, nots.data()) != DS_OK)
+            if(Notifies->SetNotificationPositions(num_updates, nots.data()) != DS_OK)
                 hr = E_FAIL;
         }
     }
 
     if(FAILED(hr))
     {
-        if(self->Notifies)
-            self->Notifies->Release();
-        self->Notifies = nullptr;
-        if(self->Buffer)
-            self->Buffer->Release();
-        self->Buffer = nullptr;
-        if(self->PrimaryBuffer)
-            self->PrimaryBuffer->Release();
-        self->PrimaryBuffer = nullptr;
+        if(mNotifies)
+            mNotifies->Release();
+        mNotifies = nullptr;
+        if(mBuffer)
+            mBuffer->Release();
+        mBuffer = nullptr;
+        if(mPrimaryBuffer)
+            mPrimaryBuffer->Release();
+        mPrimaryBuffer = nullptr;
         return ALC_FALSE;
     }
 
-    ResetEvent(self->NotifyEvent);
-    SetDefaultWFXChannelOrder(device);
+    ResetEvent(mNotifyEvent);
+    SetDefaultWFXChannelOrder(mDevice);
 
     return ALC_TRUE;
 }
 
-ALCboolean ALCdsoundPlayback_start(ALCdsoundPlayback *self)
+ALCboolean DSoundPlayback::start()
 {
     try {
-        self->mKillNow.store(AL_FALSE, std::memory_order_release);
-        self->mThread = std::thread(ALCdsoundPlayback_mixerProc, self);
+        mKillNow.store(false, std::memory_order_release);
+        mThread = std::thread{std::mem_fn(&DSoundPlayback::mixerProc), this};
         return ALC_TRUE;
     }
     catch(std::exception& e) {
@@ -638,72 +573,53 @@ ALCboolean ALCdsoundPlayback_start(ALCdsoundPlayback *self)
     return ALC_FALSE;
 }
 
-void ALCdsoundPlayback_stop(ALCdsoundPlayback *self)
+void DSoundPlayback::stop()
 {
-    if(self->mKillNow.exchange(AL_TRUE, std::memory_order_acq_rel) || !self->mThread.joinable())
+    if(mKillNow.exchange(true, std::memory_order_acq_rel) || !mThread.joinable())
         return;
+    mThread.join();
 
-    self->mThread.join();
-
-    self->Buffer->Stop();
+    mBuffer->Stop();
 }
 
 
-struct ALCdsoundCapture final : public ALCbackend {
-    IDirectSoundCapture *DSC{nullptr};
-    IDirectSoundCaptureBuffer *DSCbuffer{nullptr};
-    DWORD BufferBytes{0u};
-    DWORD Cursor{0u};
+struct DSoundCapture final : public BackendBase {
+    DSoundCapture(ALCdevice *device) noexcept : BackendBase{device} { }
+    ~DSoundCapture() override;
 
-    ll_ringbuffer_t *Ring{nullptr};
+    ALCenum open(const ALCchar *name) override;
+    ALCboolean start() override;
+    void stop() override;
+    ALCenum captureSamples(void *buffer, ALCuint samples) override;
+    ALCuint availableSamples() override;
+
+    IDirectSoundCapture *mDSC{nullptr};
+    IDirectSoundCaptureBuffer *mDSCbuffer{nullptr};
+    DWORD mBufferBytes{0u};
+    DWORD mCursor{0u};
+
+    RingBufferPtr mRing;
+
+    DEF_NEWDEL(DSoundCapture)
 };
 
-void ALCdsoundCapture_Construct(ALCdsoundCapture *self, ALCdevice *device);
-void ALCdsoundCapture_Destruct(ALCdsoundCapture *self);
-ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *name);
-DECLARE_FORWARD(ALCdsoundCapture, ALCbackend, ALCboolean, reset)
-ALCboolean ALCdsoundCapture_start(ALCdsoundCapture *self);
-void ALCdsoundCapture_stop(ALCdsoundCapture *self);
-ALCenum ALCdsoundCapture_captureSamples(ALCdsoundCapture *self, ALCvoid *buffer, ALCuint samples);
-ALCuint ALCdsoundCapture_availableSamples(ALCdsoundCapture *self);
-DECLARE_FORWARD(ALCdsoundCapture, ALCbackend, ClockLatency, getClockLatency)
-DECLARE_FORWARD(ALCdsoundCapture, ALCbackend, void, lock)
-DECLARE_FORWARD(ALCdsoundCapture, ALCbackend, void, unlock)
-DECLARE_DEFAULT_ALLOCATORS(ALCdsoundCapture)
-DEFINE_ALCBACKEND_VTABLE(ALCdsoundCapture);
-
-void ALCdsoundCapture_Construct(ALCdsoundCapture *self, ALCdevice *device)
+DSoundCapture::~DSoundCapture()
 {
-    new (self) ALCdsoundCapture{};
-    ALCbackend_Construct(STATIC_CAST(ALCbackend, self), device);
-    SET_VTABLE2(ALCdsoundCapture, ALCbackend, self);
-}
-
-void ALCdsoundCapture_Destruct(ALCdsoundCapture *self)
-{
-    ll_ringbuffer_free(self->Ring);
-    self->Ring = nullptr;
-
-    if(self->DSCbuffer)
+    if(mDSCbuffer)
     {
-        self->DSCbuffer->Stop();
-        self->DSCbuffer->Release();
-        self->DSCbuffer = nullptr;
+        mDSCbuffer->Stop();
+        mDSCbuffer->Release();
+        mDSCbuffer = nullptr;
     }
 
-    if(self->DSC)
-        self->DSC->Release();
-    self->DSC = nullptr;
-
-    ALCbackend_Destruct(STATIC_CAST(ALCbackend, self));
-    self->~ALCdsoundCapture();
+    if(mDSC)
+        mDSC->Release();
+    mDSC = nullptr;
 }
 
 
-ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *deviceName)
+ALCenum DSoundCapture::open(const ALCchar *name)
 {
-    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
-
     HRESULT hr;
     if(CaptureDevices.empty())
     {
@@ -717,28 +633,28 @@ ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *deviceName)
     }
 
     const GUID *guid{nullptr};
-    if(!deviceName && !CaptureDevices.empty())
+    if(!name && !CaptureDevices.empty())
     {
-        deviceName = CaptureDevices[0].name.c_str();
+        name = CaptureDevices[0].name.c_str();
         guid = &CaptureDevices[0].guid;
     }
     else
     {
         auto iter = std::find_if(CaptureDevices.cbegin(), CaptureDevices.cend(),
-            [deviceName](const DevMap &entry) -> bool
-            { return entry.name == deviceName; }
+            [name](const DevMap &entry) -> bool
+            { return entry.name == name; }
         );
         if(iter == CaptureDevices.cend())
             return ALC_INVALID_VALUE;
         guid = &iter->guid;
     }
 
-    switch(device->FmtType)
+    switch(mDevice->FmtType)
     {
         case DevFmtByte:
         case DevFmtUShort:
         case DevFmtUInt:
-            WARN("%s capture samples not supported\n", DevFmtTypeString(device->FmtType));
+            WARN("%s capture samples not supported\n", DevFmtTypeString(mDevice->FmtType));
             return ALC_INVALID_ENUM;
 
         case DevFmtUByte:
@@ -749,7 +665,7 @@ ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *deviceName)
     }
 
     WAVEFORMATEXTENSIBLE InputType{};
-    switch(device->FmtChans)
+    switch(mDevice->FmtChans)
     {
         case DevFmtMono:
             InputType.dwChannelMask = SPEAKER_FRONT_CENTER;
@@ -800,31 +716,31 @@ ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *deviceName)
                                       SPEAKER_SIDE_RIGHT;
             break;
         case DevFmtAmbi3D:
-            WARN("%s capture not supported\n", DevFmtChannelsString(device->FmtChans));
+            WARN("%s capture not supported\n", DevFmtChannelsString(mDevice->FmtChans));
             return ALC_INVALID_ENUM;
     }
 
     InputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-    InputType.Format.nChannels = ChannelsFromDevFmt(device->FmtChans, device->mAmbiOrder);
-    InputType.Format.wBitsPerSample = BytesFromDevFmt(device->FmtType) * 8;
+    InputType.Format.nChannels = mDevice->channelsFromFmt();
+    InputType.Format.wBitsPerSample = mDevice->bytesFromFmt() * 8;
     InputType.Format.nBlockAlign = InputType.Format.nChannels*InputType.Format.wBitsPerSample/8;
-    InputType.Format.nSamplesPerSec = device->Frequency;
+    InputType.Format.nSamplesPerSec = mDevice->Frequency;
     InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec*InputType.Format.nBlockAlign;
     InputType.Format.cbSize = 0;
     InputType.Samples.wValidBitsPerSample = InputType.Format.wBitsPerSample;
-    if(device->FmtType == DevFmtFloat)
+    if(mDevice->FmtType == DevFmtFloat)
         InputType.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
     else
         InputType.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
-    if(InputType.Format.nChannels > 2 || device->FmtType == DevFmtFloat)
+    if(InputType.Format.nChannels > 2 || mDevice->FmtType == DevFmtFloat)
     {
         InputType.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
         InputType.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
     }
 
-    ALuint samples{device->UpdateSize * device->NumUpdates};
-    samples = maxu(samples, 100 * device->Frequency / 1000);
+    ALuint samples{mDevice->BufferSize};
+    samples = maxu(samples, 100 * mDevice->Frequency / 1000);
 
     DSCBUFFERDESC DSCBDescription{};
     DSCBDescription.dwSize = sizeof(DSCBDescription);
@@ -833,108 +749,100 @@ ALCenum ALCdsoundCapture_open(ALCdsoundCapture *self, const ALCchar *deviceName)
     DSCBDescription.lpwfxFormat = &InputType.Format;
 
     //DirectSoundCapture Init code
-    hr = DirectSoundCaptureCreate(guid, &self->DSC, nullptr);
+    hr = DirectSoundCaptureCreate(guid, &mDSC, nullptr);
     if(SUCCEEDED(hr))
-        self->DSC->CreateCaptureBuffer(&DSCBDescription, &self->DSCbuffer, nullptr);
+        mDSC->CreateCaptureBuffer(&DSCBDescription, &mDSCbuffer, nullptr);
     if(SUCCEEDED(hr))
     {
-         self->Ring = ll_ringbuffer_create(device->UpdateSize*device->NumUpdates,
-                                           InputType.Format.nBlockAlign, false);
-         if(!self->Ring) hr = DSERR_OUTOFMEMORY;
+         mRing = CreateRingBuffer(mDevice->BufferSize, InputType.Format.nBlockAlign, false);
+         if(!mRing) hr = DSERR_OUTOFMEMORY;
     }
 
     if(FAILED(hr))
     {
         ERR("Device init failed: 0x%08lx\n", hr);
 
-        ll_ringbuffer_free(self->Ring);
-        self->Ring = nullptr;
-        if(self->DSCbuffer)
-            self->DSCbuffer->Release();
-        self->DSCbuffer = nullptr;
-        if(self->DSC)
-            self->DSC->Release();
-        self->DSC = nullptr;
+        mRing = nullptr;
+        if(mDSCbuffer)
+            mDSCbuffer->Release();
+        mDSCbuffer = nullptr;
+        if(mDSC)
+            mDSC->Release();
+        mDSC = nullptr;
 
         return ALC_INVALID_VALUE;
     }
 
-    self->BufferBytes = DSCBDescription.dwBufferBytes;
-    SetDefaultWFXChannelOrder(device);
+    mBufferBytes = DSCBDescription.dwBufferBytes;
+    SetDefaultWFXChannelOrder(mDevice);
 
-    device->DeviceName = deviceName;
+    mDevice->DeviceName = name;
     return ALC_NO_ERROR;
 }
 
-ALCboolean ALCdsoundCapture_start(ALCdsoundCapture *self)
+ALCboolean DSoundCapture::start()
 {
-    HRESULT hr{self->DSCbuffer->Start(DSCBSTART_LOOPING)};
+    HRESULT hr{mDSCbuffer->Start(DSCBSTART_LOOPING)};
     if(FAILED(hr))
     {
         ERR("start failed: 0x%08lx\n", hr);
-        aluHandleDisconnect(STATIC_CAST(ALCbackend, self)->mDevice,
-                            "Failure starting capture: 0x%lx", hr);
+        aluHandleDisconnect(mDevice, "Failure starting capture: 0x%lx", hr);
         return ALC_FALSE;
     }
-
     return ALC_TRUE;
 }
 
-void ALCdsoundCapture_stop(ALCdsoundCapture *self)
+void DSoundCapture::stop()
 {
-    HRESULT hr{self->DSCbuffer->Stop()};
+    HRESULT hr{mDSCbuffer->Stop()};
     if(FAILED(hr))
     {
         ERR("stop failed: 0x%08lx\n", hr);
-        aluHandleDisconnect(STATIC_CAST(ALCbackend, self)->mDevice,
-                            "Failure stopping capture: 0x%lx", hr);
+        aluHandleDisconnect(mDevice, "Failure stopping capture: 0x%lx", hr);
     }
 }
 
-ALCenum ALCdsoundCapture_captureSamples(ALCdsoundCapture *self, ALCvoid *buffer, ALCuint samples)
+ALCenum DSoundCapture::captureSamples(void *buffer, ALCuint samples)
 {
-    ll_ringbuffer_read(self->Ring, buffer, samples);
+    mRing->read(buffer, samples);
     return ALC_NO_ERROR;
 }
 
-ALCuint ALCdsoundCapture_availableSamples(ALCdsoundCapture *self)
+ALCuint DSoundCapture::availableSamples()
 {
-    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
+    if(!mDevice->Connected.load(std::memory_order_acquire))
+        return static_cast<ALCuint>(mRing->readSpace());
 
-    if(!device->Connected.load(std::memory_order_acquire))
-        return ll_ringbuffer_read_space(self->Ring);
-
-    ALsizei FrameSize{FrameSizeFromDevFmt(device->FmtChans, device->FmtType, device->mAmbiOrder)};
-    DWORD BufferBytes{self->BufferBytes};
-    DWORD LastCursor{self->Cursor};
+    ALsizei FrameSize{mDevice->frameSizeFromFmt()};
+    DWORD BufferBytes{mBufferBytes};
+    DWORD LastCursor{mCursor};
 
     DWORD ReadCursor;
     void *ReadPtr1, *ReadPtr2;
     DWORD ReadCnt1,  ReadCnt2;
-    HRESULT hr{self->DSCbuffer->GetCurrentPosition(nullptr, &ReadCursor)};
+    HRESULT hr{mDSCbuffer->GetCurrentPosition(nullptr, &ReadCursor)};
     if(SUCCEEDED(hr))
     {
         DWORD NumBytes{(ReadCursor-LastCursor + BufferBytes) % BufferBytes};
-        if(!NumBytes) return ll_ringbuffer_read_space(self->Ring);
-        hr = self->DSCbuffer->Lock(LastCursor, NumBytes, &ReadPtr1, &ReadCnt1,
-                                   &ReadPtr2, &ReadCnt2, 0);
+        if(!NumBytes) return static_cast<ALCubyte>(mRing->readSpace());
+        hr = mDSCbuffer->Lock(LastCursor, NumBytes, &ReadPtr1, &ReadCnt1, &ReadPtr2, &ReadCnt2, 0);
     }
     if(SUCCEEDED(hr))
     {
-        ll_ringbuffer_write(self->Ring, ReadPtr1, ReadCnt1/FrameSize);
-        if(ReadPtr2 != nullptr)
-            ll_ringbuffer_write(self->Ring, ReadPtr2, ReadCnt2/FrameSize);
-        hr = self->DSCbuffer->Unlock(ReadPtr1, ReadCnt1, ReadPtr2, ReadCnt2);
-        self->Cursor = (LastCursor+ReadCnt1+ReadCnt2) % BufferBytes;
+        mRing->write(ReadPtr1, ReadCnt1/FrameSize);
+        if(ReadPtr2 != nullptr && ReadCnt2 > 0)
+            mRing->write(ReadPtr2, ReadCnt2/FrameSize);
+        hr = mDSCbuffer->Unlock(ReadPtr1, ReadCnt1, ReadPtr2, ReadCnt2);
+        mCursor = (LastCursor+ReadCnt1+ReadCnt2) % BufferBytes;
     }
 
     if(FAILED(hr))
     {
         ERR("update failed: 0x%08lx\n", hr);
-        aluHandleDisconnect(device, "Failure retrieving capture data: 0x%lx", hr);
+        aluHandleDisconnect(mDevice, "Failure retrieving capture data: 0x%lx", hr);
     }
 
-    return ll_ringbuffer_read_space(self->Ring);
+    return static_cast<ALCuint>(mRing->readSpace());
 }
 
 } // namespace
@@ -947,24 +855,40 @@ BackendFactory &DSoundBackendFactory::getFactory()
 }
 
 bool DSoundBackendFactory::init()
-{ return DSoundLoad(); }
-
-void DSoundBackendFactory::deinit()
 {
-    PlaybackDevices.clear();
-    CaptureDevices.clear();
-
 #ifdef HAVE_DYNLOAD
-    if(ds_handle)
-        CloseLib(ds_handle);
-    ds_handle = nullptr;
+    if(!ds_handle)
+    {
+        ds_handle = LoadLib("dsound.dll");
+        if(!ds_handle)
+        {
+            ERR("Failed to load dsound.dll\n");
+            return false;
+        }
+
+#define LOAD_FUNC(f) do {                                                     \
+    p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(ds_handle, #f));        \
+    if(!p##f)                                                                 \
+    {                                                                         \
+        CloseLib(ds_handle);                                                  \
+        ds_handle = nullptr;                                                  \
+        return false;                                                         \
+    }                                                                         \
+} while(0)
+        LOAD_FUNC(DirectSoundCreate);
+        LOAD_FUNC(DirectSoundEnumerateW);
+        LOAD_FUNC(DirectSoundCaptureCreate);
+        LOAD_FUNC(DirectSoundCaptureEnumerateW);
+#undef LOAD_FUNC
+    }
 #endif
+    return true;
 }
 
-bool DSoundBackendFactory::querySupport(ALCbackend_Type type)
-{ return (type == ALCbackend_Playback || type == ALCbackend_Capture); }
+bool DSoundBackendFactory::querySupport(BackendType type)
+{ return (type == BackendType::Playback || type == BackendType::Capture); }
 
-void DSoundBackendFactory::probe(enum DevProbe type, std::string *outnames)
+void DSoundBackendFactory::probe(DevProbe type, std::string *outnames)
 {
     auto add_device = [outnames](const DevMap &entry) -> void
     {
@@ -979,7 +903,7 @@ void DSoundBackendFactory::probe(enum DevProbe type, std::string *outnames)
     HRESULT hrcom{CoInitialize(nullptr)};
     switch(type)
     {
-        case ALL_DEVICE_PROBE:
+        case DevProbe::Playback:
             PlaybackDevices.clear();
             hr = DirectSoundEnumerateW(DSoundEnumDevices, &PlaybackDevices);
             if(FAILED(hr))
@@ -987,7 +911,7 @@ void DSoundBackendFactory::probe(enum DevProbe type, std::string *outnames)
             std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
             break;
 
-        case CAPTURE_DEVICE_PROBE:
+        case DevProbe::Capture:
             CaptureDevices.clear();
             hr = DirectSoundCaptureEnumerateW(DSoundEnumDevices, &CaptureDevices);
             if(FAILED(hr))
@@ -999,23 +923,11 @@ void DSoundBackendFactory::probe(enum DevProbe type, std::string *outnames)
         CoUninitialize();
 }
 
-ALCbackend *DSoundBackendFactory::createBackend(ALCdevice *device, ALCbackend_Type type)
+BackendPtr DSoundBackendFactory::createBackend(ALCdevice *device, BackendType type)
 {
-    if(type == ALCbackend_Playback)
-    {
-        ALCdsoundPlayback *backend;
-        NEW_OBJ(backend, ALCdsoundPlayback)(device);
-        if(!backend) return nullptr;
-        return STATIC_CAST(ALCbackend, backend);
-    }
-
-    if(type == ALCbackend_Capture)
-    {
-        ALCdsoundCapture *backend;
-        NEW_OBJ(backend, ALCdsoundCapture)(device);
-        if(!backend) return nullptr;
-        return STATIC_CAST(ALCbackend, backend);
-    }
-
+    if(type == BackendType::Playback)
+        return BackendPtr{new DSoundPlayback{device}};
+    if(type == BackendType::Capture)
+        return BackendPtr{new DSoundCapture{device}};
     return nullptr;
 }

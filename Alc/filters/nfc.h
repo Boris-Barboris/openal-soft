@@ -16,11 +16,17 @@ struct NfcFilter3 {
     float b1, b2, b3, a1, a2, a3;
     float z[3];
 };
+struct NfcFilter4 {
+    float base_gain, gain;
+    float b1, b2, b3, b4, a1, a2, a3, a4;
+    float z[4];
+};
 
 class NfcFilter {
     NfcFilter1 first;
     NfcFilter2 second;
     NfcFilter3 third;
+    NfcFilter4 fourth;
 
 public:
     /* NOTE:
@@ -33,7 +39,7 @@ public:
      * should not be too small relative to the control distance.
      */
 
-    void init(const float w0, const float w1) noexcept;
+    void init(const float w1) noexcept;
     void adjust(const float w0) noexcept;
 
     /* Near-field control filter for first-order ambisonic channels (1-3). */
@@ -44,6 +50,9 @@ public:
 
     /* Near-field control filter for third-order ambisonic channels (9-15). */
     void process3(float *RESTRICT dst, const float *RESTRICT src, const int count);
+
+    /* Near-field control filter for fourth-order ambisonic channels (16-24). */
+    void process4(float *RESTRICT dst, const float *RESTRICT src, const int count);
 };
 
 #endif /* FILTER_NFC_H */

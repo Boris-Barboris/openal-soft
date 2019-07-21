@@ -119,9 +119,17 @@ static const struct NameValuePair {
     { "", "" }
 }, ambiFormatList[] = {
     { "Default", "" },
-    { "ACN + SN3D", "acn+sn3d" },
-    { "ACN + N3D", "acn+n3d" },
+    { "AmbiX (ACN, SN3D)", "ambix" },
+    { "ACN, N3D", "acn+n3d" },
     { "Furse-Malham", "fuma" },
+
+    { "", "" }
+}, hrtfModeList[] = {
+    { "1st Order Ambisonic", "ambi1" },
+    { "2nd Order Ambisonic", "ambi2" },
+    { "3rd Order Ambisonic", "ambi3" },
+    { "Default (Full)", "" },
+    { "Full", "full" },
 
     { "", "" }
 };
@@ -210,18 +218,38 @@ static QString getNameFromValue(const NameValuePair (&list)[N], const QString &s
     return QString();
 }
 
+
+Qt::CheckState getCheckState(const QVariant &var)
+{
+    if(var.isNull())
+        return Qt::PartiallyChecked;
+    if(var.toBool())
+        return Qt::Checked;
+    return Qt::Unchecked;
+}
+
+QString getCheckValue(const QCheckBox *checkbox)
+{
+    const Qt::CheckState state{checkbox->checkState()};
+    if(state == Qt::Checked)
+        return QString("true");
+    if(state == Qt::Unchecked)
+        return QString("false");
+    return QString();
+}
+
 }
 
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow),
-    mPeriodSizeValidator(NULL),
-    mPeriodCountValidator(NULL),
-    mSourceCountValidator(NULL),
-    mEffectSlotValidator(NULL),
-    mSourceSendValidator(NULL),
-    mSampleRateValidator(NULL),
-    mJackBufferValidator(NULL),
+    mPeriodSizeValidator(nullptr),
+    mPeriodCountValidator(nullptr),
+    mSourceCountValidator(nullptr),
+    mEffectSlotValidator(nullptr),
+    mSourceSendValidator(nullptr),
+    mSampleRateValidator(nullptr),
+    mJackBufferValidator(nullptr),
     mNeedsSave(false)
 {
     ui->setupUi(this);
@@ -247,6 +275,9 @@ MainWindow::MainWindow(QWidget *parent) :
     }
     ui->resamplerSlider->setRange(0, count-1);
 
+    for(count = 0;hrtfModeList[count].name[0];count++) {
+    }
+    ui->hrtfmodeSlider->setRange(0, count-1);
     ui->hrtfStateComboBox->adjustSize();
 
 #if !defined(HAVE_NEON) && !defined(HAVE_SSE)
@@ -347,6 +378,8 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(ui->preferredHrtfComboBox, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(enableApplyButton()));
     connect(ui->hrtfStateComboBox, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(enableApplyButton()));
+    connect(ui->hrtfmodeSlider, SIGNAL(valueChanged(int)), this, SLOT(updateHrtfModeLabel(int)));
+
     connect(ui->hrtfAddButton, SIGNAL(clicked()), this, SLOT(addHrtfFile()));
     connect(ui->hrtfRemoveButton, SIGNAL(clicked()), this, SLOT(removeHrtfFile()));
     connect(ui->hrtfFileList, SIGNAL(itemSelectionChanged()), this, SLOT(updateHrtfRemoveButton()));
@@ -387,6 +420,7 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(ui->pulseAutospawnCheckBox, SIGNAL(stateChanged(int)), this, SLOT(enableApplyButton()));
     connect(ui->pulseAllowMovesCheckBox, SIGNAL(stateChanged(int)), this, SLOT(enableApplyButton()));
     connect(ui->pulseFixRateCheckBox, SIGNAL(stateChanged(int)), this, SLOT(enableApplyButton()));
+    connect(ui->pulseAdjLatencyCheckBox, SIGNAL(stateChanged(int)), this, SLOT(enableApplyButton()));
 
     connect(ui->jackAutospawnCheckBox, SIGNAL(stateChanged(int)), this, SLOT(enableApplyButton()));
     connect(ui->jackBufferSizeSlider, SIGNAL(valueChanged(int)), this, SLOT(updateJackBufferSizeEdit(int)));
@@ -608,11 +642,11 @@ void MainWindow::loadConfig(const QString &fname)
     QString resampler = settings.value("resampler").toString().trimmed();
     ui->resamplerSlider->setValue(2);
     ui->resamplerLabel->setText(resamplerList[2].name);
-    /* The "cubic" and "sinc8" resamplers are no longer supported. Use "sinc4"
+    /* The "sinc4" and "sinc8" resamplers are no longer supported. Use "cubic"
      * as a fallback.
      */
-    if(resampler == "cubic" || resampler == "sinc8")
-        resampler = "sinc4";
+    if(resampler == "sinc4" || resampler == "sinc8")
+        resampler = "cubic";
     /* The "bsinc" resampler name is an alias for "bsinc12". */
     else if(resampler == "bsinc")
         resampler = "bsinc12";
@@ -654,19 +688,8 @@ void MainWindow::loadConfig(const QString &fname)
         updatePeriodCountSlider();
     }
 
-    if(settings.value("output-limiter").isNull())
-        ui->outputLimiterCheckBox->setCheckState(Qt::PartiallyChecked);
-    else
-        ui->outputLimiterCheckBox->setCheckState(
-            settings.value("output-limiter").toBool() ? Qt::Checked : Qt::Unchecked
-        );
-
-    if(settings.value("dither").isNull())
-        ui->outputDitherCheckBox->setCheckState(Qt::PartiallyChecked);
-    else
-        ui->outputDitherCheckBox->setCheckState(
-            settings.value("dither").toBool() ? Qt::Checked : Qt::Unchecked
-        );
+    ui->outputLimiterCheckBox->setCheckState(getCheckState(settings.value("output-limiter")));
+    ui->outputDitherCheckBox->setCheckState(getCheckState(settings.value("dither")));
 
     QString stereopan = settings.value("stereo-encoding").toString();
     ui->stereoEncodingComboBox->setCurrentIndex(0);
@@ -694,10 +717,8 @@ void MainWindow::loadConfig(const QString &fname)
 
     bool hqmode = settings.value("decoder/hq-mode", false).toBool();
     ui->decoderHQModeCheckBox->setChecked(hqmode);
-    bool distcomp = settings.value("decoder/distance-comp", true).toBool();
-    ui->decoderDistCompCheckBox->setChecked(distcomp);
-    bool nfeffects = settings.value("decoder/nfc", true).toBool();
-    ui->decoderNFEffectsCheckBox->setChecked(nfeffects);
+    ui->decoderDistCompCheckBox->setCheckState(getCheckState(settings.value("decoder/distance-comp")));
+    ui->decoderNFEffectsCheckBox->setCheckState(getCheckState(settings.value("decoder/nfc")));
     double refdelay = settings.value("decoder/nfc-ref-delay", 0.0).toDouble();
     ui->decoderNFRefDelaySpinBox->setValue(refdelay);
 
@@ -716,6 +737,21 @@ void MainWindow::loadConfig(const QString &fname)
     ui->enableSSE3CheckBox->setChecked(!disabledCpuExts.contains("sse3", Qt::CaseInsensitive));
     ui->enableSSE41CheckBox->setChecked(!disabledCpuExts.contains("sse4.1", Qt::CaseInsensitive));
     ui->enableNeonCheckBox->setChecked(!disabledCpuExts.contains("neon", Qt::CaseInsensitive));
+
+    QString hrtfmode = settings.value("hrtf-mode").toString().trimmed();
+    ui->hrtfmodeSlider->setValue(3);
+    ui->hrtfmodeLabel->setText(hrtfModeList[3].name);
+    /* The "basic" mode name is no longer supported. Use "ambi2" instead. */
+    if(hrtfmode == "basic") hrtfmode = "ambi2";
+    for(int i = 0;hrtfModeList[i].name[0];i++)
+    {
+        if(hrtfmode == hrtfModeList[i].value)
+        {
+            ui->hrtfmodeSlider->setValue(i);
+            ui->hrtfmodeLabel->setText(hrtfModeList[i].name);
+            break;
+        }
+    }
 
     QStringList hrtf_paths = settings.value("hrtf-paths").toStringList();
     if(hrtf_paths.size() == 1)
@@ -852,18 +888,19 @@ void MainWindow::loadConfig(const QString &fname)
     ui->enableDedicatedCheck->setChecked(!excludefx.contains("dedicated", Qt::CaseInsensitive));
     ui->enablePitchShifterCheck->setChecked(!excludefx.contains("pshifter", Qt::CaseInsensitive));
 
-    ui->pulseAutospawnCheckBox->setChecked(settings.value("pulse/spawn-server", true).toBool());
-    ui->pulseAllowMovesCheckBox->setChecked(settings.value("pulse/allow-moves", false).toBool());
-    ui->pulseFixRateCheckBox->setChecked(settings.value("pulse/fix-rate", false).toBool());
+    ui->pulseAutospawnCheckBox->setCheckState(getCheckState(settings.value("pulse/spawn-server")));
+    ui->pulseAllowMovesCheckBox->setCheckState(getCheckState(settings.value("pulse/allow-moves")));
+    ui->pulseFixRateCheckBox->setCheckState(getCheckState(settings.value("pulse/fix-rate")));
+    ui->pulseAdjLatencyCheckBox->setCheckState(getCheckState(settings.value("pulse/adjust-latency")));
 
-    ui->jackAutospawnCheckBox->setChecked(settings.value("jack/spawn-server", false).toBool());
+    ui->jackAutospawnCheckBox->setCheckState(getCheckState(settings.value("jack/spawn-server")));
     ui->jackBufferSizeLine->setText(settings.value("jack/buffer-size", QString()).toString());
     updateJackBufferSizeSlider();
 
     ui->alsaDefaultDeviceLine->setText(settings.value("alsa/device", QString()).toString());
     ui->alsaDefaultCaptureLine->setText(settings.value("alsa/capture", QString()).toString());
-    ui->alsaResamplerCheckBox->setChecked(settings.value("alsa/allow-resampler", false).toBool());
-    ui->alsaMmapCheckBox->setChecked(settings.value("alsa/mmap", true).toBool());
+    ui->alsaResamplerCheckBox->setCheckState(getCheckState(settings.value("alsa/allow-resampler")));
+    ui->alsaMmapCheckBox->setCheckState(getCheckState(settings.value("alsa/mmap")));
 
     ui->ossDefaultDeviceLine->setText(settings.value("oss/device", QString()).toString());
     ui->ossDefaultCaptureLine->setText(settings.value("oss/capture", QString()).toString());
@@ -885,7 +922,7 @@ void MainWindow::saveCurrentConfig()
     ui->closeCancelButton->setText(tr("Close"));
     mNeedsSave = false;
     QMessageBox::information(this, tr("Information"),
-                             tr("Applications using OpenAL need to be restarted for changes to take effect."));
+        tr("Applications using OpenAL need to be restarted for changes to take effect."));
 }
 
 void MainWindow::saveConfigAsFile()
@@ -933,31 +970,14 @@ void MainWindow::saveConfig(const QString &fname) const
     settings.setValue("stereo-encoding", getValueFromName(stereoEncList, ui->stereoEncodingComboBox->currentText()));
     settings.setValue("ambi-format", getValueFromName(ambiFormatList, ui->ambiFormatComboBox->currentText()));
 
-    Qt::CheckState limiter = ui->outputLimiterCheckBox->checkState();
-    if(limiter == Qt::PartiallyChecked)
-        settings.setValue("output-limiter", QString());
-    else if(limiter == Qt::Checked)
-        settings.setValue("output-limiter", QString("true"));
-    else if(limiter == Qt::Unchecked)
-        settings.setValue("output-limiter", QString("false"));
-
-    Qt::CheckState dither = ui->outputDitherCheckBox->checkState();
-    if(dither == Qt::PartiallyChecked)
-        settings.setValue("dither", QString());
-    else if(dither == Qt::Checked)
-        settings.setValue("dither", QString("true"));
-    else if(dither == Qt::Unchecked)
-        settings.setValue("dither", QString("false"));
+    settings.setValue("output-limiter", getCheckValue(ui->outputLimiterCheckBox));
+    settings.setValue("dither", getCheckValue(ui->outputDitherCheckBox));
 
     settings.setValue("decoder/hq-mode",
         ui->decoderHQModeCheckBox->isChecked() ? QString("true") : QString(/*"false"*/)
     );
-    settings.setValue("decoder/distance-comp",
-        ui->decoderDistCompCheckBox->isChecked() ? QString(/*"true"*/) : QString("false")
-    );
-    settings.setValue("decoder/nfc",
-        ui->decoderNFEffectsCheckBox->isChecked() ? QString(/*"true"*/) : QString("false")
-    );
+    settings.setValue("decoder/distance-comp", getCheckValue(ui->decoderDistCompCheckBox));
+    settings.setValue("decoder/nfc", getCheckValue(ui->decoderNFEffectsCheckBox));
     double refdelay = ui->decoderNFRefDelaySpinBox->value();
     settings.setValue("decoder/nfc-ref-delay",
         (refdelay > 0.0) ? QString::number(refdelay) : QString()
@@ -980,6 +1000,8 @@ void MainWindow::saveConfig(const QString &fname) const
     if(!ui->enableNeonCheckBox->isChecked())
         strlist.append("neon");
     settings.setValue("disable-cpu-exts", strlist.join(QChar(',')));
+
+    settings.setValue("hrtf-mode", hrtfModeList[ui->hrtfmodeSlider->value()].value);
 
     if(ui->hrtfStateComboBox->currentIndex() == 1)
         settings.setValue("hrtf", "true");
@@ -1072,29 +1094,18 @@ void MainWindow::saveConfig(const QString &fname) const
         strlist.append("pshifter");
     settings.setValue("excludefx", strlist.join(QChar(',')));
 
-    settings.setValue("pulse/spawn-server",
-        ui->pulseAutospawnCheckBox->isChecked() ? QString(/*"true"*/) : QString("false")
-    );
-    settings.setValue("pulse/allow-moves",
-        ui->pulseAllowMovesCheckBox->isChecked() ? QString("true") : QString(/*"false"*/)
-    );
-    settings.setValue("pulse/fix-rate",
-        ui->pulseFixRateCheckBox->isChecked() ? QString("true") : QString(/*"false"*/)
-    );
+    settings.setValue("pulse/spawn-server", getCheckValue(ui->pulseAutospawnCheckBox));
+    settings.setValue("pulse/allow-moves", getCheckValue(ui->pulseAllowMovesCheckBox));
+    settings.setValue("pulse/fix-rate", getCheckValue(ui->pulseFixRateCheckBox));
+    settings.setValue("pulse/adjust-latency", getCheckValue(ui->pulseAdjLatencyCheckBox));
 
-    settings.setValue("jack/spawn-server",
-        ui->jackAutospawnCheckBox->isChecked() ? QString("true") : QString(/*"false"*/)
-    );
+    settings.setValue("jack/spawn-server", getCheckValue(ui->jackAutospawnCheckBox));
     settings.setValue("jack/buffer-size", ui->jackBufferSizeLine->text());
 
     settings.setValue("alsa/device", ui->alsaDefaultDeviceLine->text());
     settings.setValue("alsa/capture", ui->alsaDefaultCaptureLine->text());
-    settings.setValue("alsa/allow-resampler",
-        ui->alsaResamplerCheckBox->isChecked() ? QString("true") : QString(/*"false"*/)
-    );
-    settings.setValue("alsa/mmap",
-        ui->alsaMmapCheckBox->isChecked() ? QString(/*"true"*/) : QString("false")
-    );
+    settings.setValue("alsa/allow-resampler", getCheckValue(ui->alsaResamplerCheckBox));
+    settings.setValue("alsa/mmap", getCheckValue(ui->alsaMmapCheckBox));
 
     settings.setValue("oss/device", ui->ossDefaultDeviceLine->text());
     settings.setValue("oss/capture", ui->ossDefaultCaptureLine->text());
@@ -1139,10 +1150,7 @@ void MainWindow::updatePeriodSizeEdit(int size)
 {
     ui->periodSizeEdit->clear();
     if(size >= 64)
-    {
-        size = (size+32)&~0x3f;
         ui->periodSizeEdit->insert(QString::number(size));
-    }
     enableApplyButton();
 }
 
@@ -1224,8 +1232,15 @@ void MainWindow::updateJackBufferSizeEdit(int size)
 void MainWindow::updateJackBufferSizeSlider()
 {
     int value = ui->jackBufferSizeLine->text().toInt();
-    int pos = (int)floor(log2(value) + 0.5);
+    int pos = static_cast<int>(floor(log2(value) + 0.5));
     ui->jackBufferSizeSlider->setSliderPosition(pos);
+    enableApplyButton();
+}
+
+
+void MainWindow::updateHrtfModeLabel(int num)
+{
+    ui->hrtfmodeLabel->setText(hrtfModeList[num].name);
     enableApplyButton();
 }
 
@@ -1285,7 +1300,7 @@ void MainWindow::showEnabledBackendMenu(QPoint pt)
             delete item;
         enableApplyButton();
     }
-    else if(gotAction != NULL)
+    else if(gotAction != nullptr)
     {
         QMap<QAction*,QString>::const_iterator iter = actionMap.find(gotAction);
         if(iter != actionMap.end())
@@ -1323,7 +1338,7 @@ void MainWindow::showDisabledBackendMenu(QPoint pt)
             delete item;
         enableApplyButton();
     }
-    else if(gotAction != NULL)
+    else if(gotAction != nullptr)
     {
         QMap<QAction*,QString>::const_iterator iter = actionMap.find(gotAction);
         if(iter != actionMap.end())

@@ -22,13 +22,14 @@
 
 #include "backends/null.h"
 
-#include <stdlib.h>
+#include <cstdlib>
 #ifdef HAVE_WINDOWS_H
 #include <windows.h>
 #endif
 
 #include <chrono>
 #include <thread>
+#include <functional>
 
 #include "alMain.h"
 #include "alu.h"
@@ -44,71 +45,49 @@ using std::chrono::nanoseconds;
 constexpr ALCchar nullDevice[] = "No Output";
 
 
-struct ALCnullBackend final : public ALCbackend {
-    std::atomic<ALenum> mKillNow{AL_TRUE};
+struct NullBackend final : public BackendBase {
+    NullBackend(ALCdevice *device) noexcept : BackendBase{device} { }
+
+    int mixerProc();
+
+    ALCenum open(const ALCchar *name) override;
+    ALCboolean reset() override;
+    ALCboolean start() override;
+    void stop() override;
+
+    std::atomic<bool> mKillNow{true};
     std::thread mThread;
+
+    DEF_NEWDEL(NullBackend)
 };
 
-int ALCnullBackend_mixerProc(ALCnullBackend *self);
-
-void ALCnullBackend_Construct(ALCnullBackend *self, ALCdevice *device);
-void ALCnullBackend_Destruct(ALCnullBackend *self);
-ALCenum ALCnullBackend_open(ALCnullBackend *self, const ALCchar *name);
-ALCboolean ALCnullBackend_reset(ALCnullBackend *self);
-ALCboolean ALCnullBackend_start(ALCnullBackend *self);
-void ALCnullBackend_stop(ALCnullBackend *self);
-DECLARE_FORWARD2(ALCnullBackend, ALCbackend, ALCenum, captureSamples, void*, ALCuint)
-DECLARE_FORWARD(ALCnullBackend, ALCbackend, ALCuint, availableSamples)
-DECLARE_FORWARD(ALCnullBackend, ALCbackend, ClockLatency, getClockLatency)
-DECLARE_FORWARD(ALCnullBackend, ALCbackend, void, lock)
-DECLARE_FORWARD(ALCnullBackend, ALCbackend, void, unlock)
-DECLARE_DEFAULT_ALLOCATORS(ALCnullBackend)
-
-DEFINE_ALCBACKEND_VTABLE(ALCnullBackend);
-
-
-void ALCnullBackend_Construct(ALCnullBackend *self, ALCdevice *device)
+int NullBackend::mixerProc()
 {
-    new (self) ALCnullBackend{};
-    ALCbackend_Construct(STATIC_CAST(ALCbackend, self), device);
-    SET_VTABLE2(ALCnullBackend, ALCbackend, self);
-}
-
-void ALCnullBackend_Destruct(ALCnullBackend *self)
-{
-    ALCbackend_Destruct(STATIC_CAST(ALCbackend, self));
-    self->~ALCnullBackend();
-}
-
-
-int ALCnullBackend_mixerProc(ALCnullBackend *self)
-{
-    ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
-    const milliseconds restTime{device->UpdateSize*1000/device->Frequency / 2};
+    const milliseconds restTime{mDevice->UpdateSize*1000/mDevice->Frequency / 2};
 
     SetRTPriority();
     althrd_setname(MIXER_THREAD_NAME);
 
-    ALint64 done{0};
+    int64_t done{0};
     auto start = std::chrono::steady_clock::now();
-    while(!self->mKillNow.load(std::memory_order_acquire) &&
-          device->Connected.load(std::memory_order_acquire))
+    while(!mKillNow.load(std::memory_order_acquire) &&
+          mDevice->Connected.load(std::memory_order_acquire))
     {
         auto now = std::chrono::steady_clock::now();
 
         /* This converts from nanoseconds to nanosamples, then to samples. */
-        ALint64 avail{std::chrono::duration_cast<seconds>((now-start) * device->Frequency).count()};
-        if(avail-done < device->UpdateSize)
+        int64_t avail{std::chrono::duration_cast<seconds>((now-start) * mDevice->Frequency).count()};
+        if(avail-done < mDevice->UpdateSize)
         {
             std::this_thread::sleep_for(restTime);
             continue;
         }
-        while(avail-done >= device->UpdateSize)
+        while(avail-done >= mDevice->UpdateSize)
         {
-            ALCnullBackend_lock(self);
-            aluMixData(device, nullptr, device->UpdateSize);
-            ALCnullBackend_unlock(self);
-            done += device->UpdateSize;
+            lock();
+            aluMixData(mDevice, nullptr, mDevice->UpdateSize);
+            unlock();
+            done += mDevice->UpdateSize;
         }
 
         /* For every completed second, increment the start time and reduce the
@@ -116,11 +95,11 @@ int ALCnullBackend_mixerProc(ALCnullBackend *self)
          * and current time from growing too large, while maintaining the
          * correct number of samples to render.
          */
-        if(done >= device->Frequency)
+        if(done >= mDevice->Frequency)
         {
-            seconds s{done/device->Frequency};
+            seconds s{done/mDevice->Frequency};
             start += s;
-            done -= device->Frequency*s.count();
+            done -= mDevice->Frequency*s.count();
         }
     }
 
@@ -128,32 +107,29 @@ int ALCnullBackend_mixerProc(ALCnullBackend *self)
 }
 
 
-ALCenum ALCnullBackend_open(ALCnullBackend *self, const ALCchar *name)
+ALCenum NullBackend::open(const ALCchar *name)
 {
-    ALCdevice *device;
-
     if(!name)
         name = nullDevice;
     else if(strcmp(name, nullDevice) != 0)
         return ALC_INVALID_VALUE;
 
-    device = STATIC_CAST(ALCbackend, self)->mDevice;
-    device->DeviceName = name;
+    mDevice->DeviceName = name;
 
     return ALC_NO_ERROR;
 }
 
-ALCboolean ALCnullBackend_reset(ALCnullBackend *self)
+ALCboolean NullBackend::reset()
 {
-    SetDefaultWFXChannelOrder(STATIC_CAST(ALCbackend, self)->mDevice);
+    SetDefaultWFXChannelOrder(mDevice);
     return ALC_TRUE;
 }
 
-ALCboolean ALCnullBackend_start(ALCnullBackend *self)
+ALCboolean NullBackend::start()
 {
     try {
-        self->mKillNow.store(AL_FALSE, std::memory_order_release);
-        self->mThread = std::thread(ALCnullBackend_mixerProc, self);
+        mKillNow.store(false, std::memory_order_release);
+        mThread = std::thread{std::mem_fn(&NullBackend::mixerProc), this};
         return ALC_TRUE;
     }
     catch(std::exception& e) {
@@ -164,11 +140,11 @@ ALCboolean ALCnullBackend_start(ALCnullBackend *self)
     return ALC_FALSE;
 }
 
-void ALCnullBackend_stop(ALCnullBackend *self)
+void NullBackend::stop()
 {
-    if(self->mKillNow.exchange(AL_TRUE, std::memory_order_acq_rel) || !self->mThread.joinable())
+    if(mKillNow.exchange(true, std::memory_order_acq_rel) || !mThread.joinable())
         return;
-    self->mThread.join();
+    mThread.join();
 }
 
 } // namespace
@@ -177,33 +153,27 @@ void ALCnullBackend_stop(ALCnullBackend *self)
 bool NullBackendFactory::init()
 { return true; }
 
-bool NullBackendFactory::querySupport(ALCbackend_Type type)
-{ return (type == ALCbackend_Playback); }
+bool NullBackendFactory::querySupport(BackendType type)
+{ return (type == BackendType::Playback); }
 
-void NullBackendFactory::probe(enum DevProbe type, std::string *outnames)
+void NullBackendFactory::probe(DevProbe type, std::string *outnames)
 {
     switch(type)
     {
-        case ALL_DEVICE_PROBE:
+        case DevProbe::Playback:
             /* Includes null char. */
             outnames->append(nullDevice, sizeof(nullDevice));
             break;
-        case CAPTURE_DEVICE_PROBE:
+        case DevProbe::Capture:
             break;
     }
 }
 
-ALCbackend *NullBackendFactory::createBackend(ALCdevice *device, ALCbackend_Type type)
+BackendPtr NullBackendFactory::createBackend(ALCdevice *device, BackendType type)
 {
-    if(type == ALCbackend_Playback)
-    {
-        ALCnullBackend *backend;
-        NEW_OBJ(backend, ALCnullBackend)(device);
-        if(!backend) return NULL;
-        return STATIC_CAST(ALCbackend, backend);
-    }
-
-    return NULL;
+    if(type == BackendType::Playback)
+        return BackendPtr{new NullBackend{device}};
+    return nullptr;
 }
 
 BackendFactory &NullBackendFactory::getFactory()

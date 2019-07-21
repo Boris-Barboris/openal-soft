@@ -15,8 +15,10 @@
 #include "vector.h"
 #include "threads.h"
 #include "almalloc.h"
+#include "alnumeric.h"
 
 #include "alListener.h"
+#include "alu.h"
 
 
 struct ALsource;
@@ -25,9 +27,7 @@ struct ALcontextProps;
 struct ALlistenerProps;
 struct ALvoiceProps;
 struct ALeffectslotProps;
-struct ALvoice;
-struct ALeffectslotArray;
-struct ll_ringbuffer;
+struct RingBuffer;
 
 enum class DistanceModel {
     InverseClamped  = AL_INVERSE_DISTANCE_CLAMPED,
@@ -42,13 +42,13 @@ enum class DistanceModel {
 };
 
 struct SourceSubList {
-    uint64_t FreeMask{~uint64_t{}};
+    uint64_t FreeMask{~0_u64};
     ALsource *Sources{nullptr}; /* 64 */
 
     SourceSubList() noexcept = default;
     SourceSubList(const SourceSubList&) = delete;
     SourceSubList(SourceSubList&& rhs) noexcept : FreeMask{rhs.FreeMask}, Sources{rhs.Sources}
-    { rhs.FreeMask = ~uint64_t{}; rhs.Sources = nullptr; }
+    { rhs.FreeMask = ~0_u64; rhs.Sources = nullptr; }
     ~SourceSubList();
 
     SourceSubList& operator=(const SourceSubList&) = delete;
@@ -56,19 +56,31 @@ struct SourceSubList {
     { std::swap(FreeMask, rhs.FreeMask); std::swap(Sources, rhs.Sources); return *this; }
 };
 
-/* Effect slots are rather large, and apps aren't likely to have more than one
- * or two (let alone 64), so hold them individually.
- */
-using ALeffectslotPtr = std::unique_ptr<ALeffectslot>;
+struct EffectSlotSubList {
+    uint64_t FreeMask{~0_u64};
+    ALeffectslot *EffectSlots{nullptr}; /* 64 */
 
-struct ALCcontext_struct {
+    EffectSlotSubList() noexcept = default;
+    EffectSlotSubList(const EffectSlotSubList&) = delete;
+    EffectSlotSubList(EffectSlotSubList&& rhs) noexcept
+      : FreeMask{rhs.FreeMask}, EffectSlots{rhs.EffectSlots}
+    { rhs.FreeMask = ~0_u64; rhs.EffectSlots = nullptr; }
+    ~EffectSlotSubList();
+
+    EffectSlotSubList& operator=(const EffectSlotSubList&) = delete;
+    EffectSlotSubList& operator=(EffectSlotSubList&& rhs) noexcept
+    { std::swap(FreeMask, rhs.FreeMask); std::swap(EffectSlots, rhs.EffectSlots); return *this; }
+};
+
+struct ALCcontext {
     RefCount ref{1u};
 
     al::vector<SourceSubList> SourceList;
     ALuint NumSources{0};
     std::mutex SourceLock;
 
-    al::vector<ALeffectslotPtr> EffectSlotList;
+    al::vector<EffectSlotSubList> EffectSlotList;
+    ALuint NumEffectSlots{0u};
     std::mutex EffectSlotLock;
 
     std::atomic<ALenum> LastError{AL_NO_ERROR};
@@ -81,7 +93,7 @@ struct ALCcontext_struct {
     ALfloat SpeedOfSound{};
     ALfloat MetersPerUnit{1.0f};
 
-    std::atomic_flag PropsClean{true};
+    std::atomic_flag PropsClean;
     std::atomic<bool> DeferUpdates{false};
 
     std::mutex PropLock;
@@ -90,7 +102,7 @@ struct ALCcontext_struct {
      * indicates if updates are currently happening).
      */
     RefCount UpdateCount{0u};
-    std::atomic<ALenum> HoldUpdates{AL_FALSE};
+    std::atomic<bool> HoldUpdates{false};
 
     ALfloat GainBoost{1.0f};
 
@@ -104,15 +116,15 @@ struct ALCcontext_struct {
     std::atomic<ALvoiceProps*> FreeVoiceProps{nullptr};
     std::atomic<ALeffectslotProps*> FreeEffectslotProps{nullptr};
 
-    ALvoice **Voices{nullptr};
-    std::atomic<ALsizei> VoiceCount{0};
-    ALsizei MaxVoices{0};
+    std::unique_ptr<al::FlexArray<ALvoice>> Voices{nullptr};
+    std::atomic<ALuint> VoiceCount{0u};
 
+    using ALeffectslotArray = al::FlexArray<ALeffectslot*>;
     std::atomic<ALeffectslotArray*> ActiveAuxSlots{nullptr};
 
     std::thread EventThread;
     al::semaphore EventSem;
-    ll_ringbuffer *AsyncEvents{nullptr};
+    std::unique_ptr<RingBuffer> AsyncEvents;
     std::atomic<ALbitfieldSOFT> EnabledEvts{0u};
     std::mutex EventCbLock;
     ALEVENTPROCSOFT EventCb{};
@@ -124,15 +136,13 @@ struct ALCcontext_struct {
     ALCdevice *const Device;
     const ALCchar *ExtensionList{nullptr};
 
-    std::atomic<ALCcontext*> next{nullptr};
-
     ALlistener Listener{};
 
 
-    ALCcontext_struct(ALCdevice *device);
-    ALCcontext_struct(const ALCcontext_struct&) = delete;
-    ALCcontext_struct& operator=(const ALCcontext_struct&) = delete;
-    ~ALCcontext_struct();
+    ALCcontext(ALCdevice *device);
+    ALCcontext(const ALCcontext&) = delete;
+    ALCcontext& operator=(const ALCcontext&) = delete;
+    ~ALCcontext();
 
     DEF_NEWDEL(ALCcontext)
 };
@@ -172,8 +182,8 @@ public:
 
     operator bool() const noexcept { return mCtx != nullptr; }
 
-    ALCcontext* operator->() noexcept { return mCtx; }
-    ALCcontext* get() noexcept { return mCtx; }
+    ALCcontext* operator->() const noexcept { return mCtx; }
+    ALCcontext* get() const noexcept { return mCtx; }
 
     ALCcontext* release() noexcept
     {
@@ -182,6 +192,13 @@ public:
         return ret;
     }
 };
+
+inline bool operator==(const ContextRef &lhs, const ALCcontext *rhs) noexcept
+{ return lhs.get() == rhs; }
+inline bool operator!=(const ContextRef &lhs, const ALCcontext *rhs) noexcept
+{ return !(lhs == rhs); }
+inline bool operator<(const ContextRef &lhs, const ALCcontext *rhs) noexcept
+{ return lhs.get() < rhs; }
 
 ContextRef GetContextRef(void);
 

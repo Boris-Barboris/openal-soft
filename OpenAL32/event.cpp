@@ -13,15 +13,17 @@
 #include "alAuxEffectSlot.h"
 #include "ringbuffer.h"
 #include "threads.h"
+#include "alexcpt.h"
 
 
 static int EventThread(ALCcontext *context)
 {
+    RingBuffer *ring{context->AsyncEvents.get()};
     bool quitnow{false};
     while(LIKELY(!quitnow))
     {
-        AsyncEvent evt;
-        if(ll_ringbuffer_read(context->AsyncEvents, &evt, 1) == 0)
+        auto evt_data = ring->getReadVector().first;
+        if(evt_data.len == 0)
         {
             context->EventSem.wait();
             continue;
@@ -29,6 +31,22 @@ static int EventThread(ALCcontext *context)
 
         std::lock_guard<std::mutex> _{context->EventCbLock};
         do {
+            auto &evt = *reinterpret_cast<AsyncEvent*>(evt_data.buf);
+            evt_data.buf += sizeof(AsyncEvent);
+            evt_data.len -= 1;
+            /* This automatically destructs the event object and advances the
+             * ringbuffer's read offset at the end of scope.
+             */
+            const struct EventAutoDestructor {
+                AsyncEvent &evt_;
+                RingBuffer *ring_;
+                ~EventAutoDestructor()
+                {
+                    al::destroy_at(&evt_);
+                    ring_->readAdvance(1);
+                }
+            } _{evt, ring};
+
             quitnow = evt.EnumType == EventType_KillThread;
             if(UNLIKELY(quitnow)) break;
 
@@ -52,7 +70,8 @@ static int EventThread(ALCcontext *context)
                     (evt.u.srcstate.state==AL_PAUSED) ? "AL_PAUSED" :
                     (evt.u.srcstate.state==AL_STOPPED) ? "AL_STOPPED" : "<unknown>";
                 context->EventCb(AL_EVENT_TYPE_SOURCE_STATE_CHANGED_SOFT, evt.u.srcstate.id,
-                    evt.u.srcstate.state, msg.length(), msg.c_str(), context->EventParam
+                    evt.u.srcstate.state, static_cast<ALsizei>(msg.length()), msg.c_str(),
+                    context->EventParam
                 );
             }
             else if(evt.EnumType == EventType_BufferCompleted)
@@ -63,14 +82,16 @@ static int EventThread(ALCcontext *context)
                 if(evt.u.bufcomp.count == 1) msg += " buffer completed";
                 else msg += " buffers completed";
                 context->EventCb(AL_EVENT_TYPE_BUFFER_COMPLETED_SOFT, evt.u.bufcomp.id,
-                    evt.u.bufcomp.count, msg.length(), msg.c_str(), context->EventParam
+                    evt.u.bufcomp.count, static_cast<ALsizei>(msg.length()), msg.c_str(),
+                    context->EventParam
                 );
             }
             else if((enabledevts&evt.EnumType) == evt.EnumType)
                 context->EventCb(evt.u.user.type, evt.u.user.id, evt.u.user.param,
-                    (ALsizei)strlen(evt.u.user.msg), evt.u.user.msg, context->EventParam
+                    static_cast<ALsizei>(strlen(evt.u.user.msg)), evt.u.user.msg,
+                    context->EventParam
                 );
-        } while(ll_ringbuffer_read(context->AsyncEvents, &evt, 1) != 0);
+        } while(evt_data.len != 0);
     }
     return 0;
 }
@@ -78,7 +99,7 @@ static int EventThread(ALCcontext *context)
 void StartEventThrd(ALCcontext *ctx)
 {
     try {
-        ctx->EventThread = std::thread(EventThread, ctx);
+        ctx->EventThread = std::thread{EventThread, ctx};
     }
     catch(std::exception& e) {
         ERR("Failed to start event thread: %s\n", e.what());
@@ -90,15 +111,26 @@ void StartEventThrd(ALCcontext *ctx)
 
 void StopEventThrd(ALCcontext *ctx)
 {
-    static constexpr AsyncEvent kill_evt = ASYNC_EVENT(EventType_KillThread);
-    while(ll_ringbuffer_write(ctx->AsyncEvents, &kill_evt, 1) == 0)
-        std::this_thread::yield();
+    static constexpr AsyncEvent kill_evt{EventType_KillThread};
+    RingBuffer *ring{ctx->AsyncEvents.get()};
+    auto evt_data = ring->getWriteVector().first;
+    if(evt_data.len == 0)
+    {
+        do {
+            std::this_thread::yield();
+            evt_data = ring->getWriteVector().first;
+        } while(evt_data.len == 0);
+    }
+    new (evt_data.buf) AsyncEvent{kill_evt};
+    ring->writeAdvance(1);
+
     ctx->EventSem.post();
     if(ctx->EventThread.joinable())
         ctx->EventThread.join();
 }
 
 AL_API void AL_APIENTRY alEventControlSOFT(ALsizei count, const ALenum *types, ALboolean enable)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -156,8 +188,10 @@ AL_API void AL_APIENTRY alEventControlSOFT(ALsizei count, const ALenum *types, A
         std::lock_guard<std::mutex>{context->EventCbLock};
     }
 }
+END_API_FUNC
 
 AL_API void AL_APIENTRY alEventCallbackSOFT(ALEVENTPROCSOFT callback, void *userParam)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -167,3 +201,4 @@ AL_API void AL_APIENTRY alEventCallbackSOFT(ALEVENTPROCSOFT callback, void *user
     context->EventCb = callback;
     context->EventParam = userParam;
 }
+END_API_FUNC

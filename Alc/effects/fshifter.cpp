@@ -46,13 +46,13 @@ using complex_d = std::complex<double>;
 
 /* Define a Hann window, used to filter the HIL input and output. */
 /* Making this constexpr seems to require C++14. */
-std::array<ALdouble,HIL_SIZE> InitHannWindow(void)
+std::array<ALdouble,HIL_SIZE> InitHannWindow()
 {
     std::array<ALdouble,HIL_SIZE> ret;
     /* Create lookup table of the Hann window for the desired size, i.e. HIL_SIZE */
     for(ALsizei i{0};i < HIL_SIZE>>1;i++)
     {
-        ALdouble val = std::sin(M_PI * (ALdouble)i / (ALdouble)(HIL_SIZE-1));
+        ALdouble val = std::sin(al::MathDefs<double>::Pi() * i / ALdouble{HIL_SIZE-1});
         ret[i] = ret[HIL_SIZE-1-i] = val * val;
     }
     return ret;
@@ -60,7 +60,7 @@ std::array<ALdouble,HIL_SIZE> InitHannWindow(void)
 alignas(16) const std::array<ALdouble,HIL_SIZE> HannWindow = InitHannWindow();
 
 
-struct ALfshifterState final : public EffectState {
+struct FshifterState final : public EffectState {
     /* Effect parameters */
     ALsizei  mCount{};
     ALsizei  mPhaseStep{};
@@ -81,14 +81,14 @@ struct ALfshifterState final : public EffectState {
     ALfloat mTargetGains[MAX_OUTPUT_CHANNELS]{};
 
 
-    ALboolean deviceUpdate(ALCdevice *device) override;
-    void update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props) override;
-    void process(ALsizei samplesToDo, const ALfloat (*RESTRICT samplesIn)[BUFFERSIZE], ALfloat (*RESTRICT samplesOut)[BUFFERSIZE], ALsizei numChannels) override;
+    ALboolean deviceUpdate(const ALCdevice *device) override;
+    void update(const ALCcontext *context, const ALeffectslot *slot, const EffectProps *props, const EffectTarget target) override;
+    void process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei numInput, const al::span<FloatBufferLine> samplesOut) override;
 
-    DEF_NEWDEL(ALfshifterState)
+    DEF_NEWDEL(FshifterState)
 };
 
-ALboolean ALfshifterState::deviceUpdate(ALCdevice *UNUSED(device))
+ALboolean FshifterState::deviceUpdate(const ALCdevice *UNUSED(device))
 {
     /* (Re-)initializing parameters and clear the buffers. */
     mCount     = FIFO_LATENCY;
@@ -107,11 +107,11 @@ ALboolean ALfshifterState::deviceUpdate(ALCdevice *UNUSED(device))
     return AL_TRUE;
 }
 
-void ALfshifterState::update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props)
+void FshifterState::update(const ALCcontext *context, const ALeffectslot *slot, const EffectProps *props, const EffectTarget target)
 {
     const ALCdevice *device{context->Device};
 
-    ALfloat step{props->Fshifter.Frequency / (ALfloat)device->Frequency};
+    ALfloat step{props->Fshifter.Frequency / static_cast<ALfloat>(device->Frequency)};
     mPhaseStep = fastf2i(minf(step, 0.5f) * FRACTIONONE);
 
     switch(props->Fshifter.LeftDirection)
@@ -130,20 +130,22 @@ void ALfshifterState::update(const ALCcontext *context, const ALeffectslot *slot
             break;
     }
 
-    ALfloat coeffs[MAX_AMBI_COEFFS];
-    CalcAngleCoeffs(0.0f, 0.0f, 0.0f, coeffs);
-    ComputePanGains(&device->Dry, coeffs, slot->Params.Gain, mTargetGains);
+    ALfloat coeffs[MAX_AMBI_CHANNELS];
+    CalcDirectionCoeffs({0.0f, 0.0f, -1.0f}, 0.0f, coeffs);
+
+    mOutTarget = target.Main->Buffer;
+    ComputePanGains(target.Main, coeffs, slot->Params.Gain, mTargetGains);
 }
 
-void ALfshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT SamplesIn)[BUFFERSIZE], ALfloat (*RESTRICT SamplesOut)[BUFFERSIZE], ALsizei NumChannels)
+void FshifterState::process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei /*numInput*/, const al::span<FloatBufferLine> samplesOut)
 {
-    static const complex_d complex_zero{0.0, 0.0};
+    static constexpr complex_d complex_zero{0.0, 0.0};
     ALfloat *RESTRICT BufferOut = mBufferOut;
     ALsizei j, k, base;
 
-    for(base = 0;base < SamplesToDo;)
+    for(base = 0;base < samplesToDo;)
     {
-        ALsizei todo = mini(HIL_SIZE-mCount, SamplesToDo-base);
+        const ALsizei todo{mini(HIL_SIZE-mCount, samplesToDo-base)};
 
         ASSUME(todo > 0);
 
@@ -151,7 +153,7 @@ void ALfshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
         k = mCount;
         for(j = 0;j < todo;j++,k++)
         {
-            mInFIFO[k] = SamplesIn[0][base+j];
+            mInFIFO[k] = samplesIn[0][base+j];
             mOutdata[base+j]  = mOutFIFO[k-FIFO_LATENCY];
         }
         mCount += todo;
@@ -169,7 +171,7 @@ void ALfshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
         }
 
         /* Processing signal by Discrete Hilbert Transform (analytical signal). */
-        complex_hilbert(mAnalytic, HIL_SIZE);
+        complex_hilbert(mAnalytic);
 
         /* Windowing and add to output accumulator */
         for(k = 0;k < HIL_SIZE;k++)
@@ -184,40 +186,24 @@ void ALfshifterState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT Samp
     }
 
     /* Process frequency shifter using the analytic signal obtained. */
-    for(k = 0;k < SamplesToDo;k++)
+    for(k = 0;k < samplesToDo;k++)
     {
-        double phase = mPhase * ((1.0/FRACTIONONE) * 2.0*M_PI);
-        BufferOut[k] = (float)(mOutdata[k].real()*std::cos(phase) +
-                               mOutdata[k].imag()*std::sin(phase)*mLdSign);
+        double phase = mPhase * ((1.0/FRACTIONONE) * al::MathDefs<double>::Tau());
+        BufferOut[k] = static_cast<float>(mOutdata[k].real()*std::cos(phase) +
+            mOutdata[k].imag()*std::sin(phase)*mLdSign);
 
         mPhase += mPhaseStep;
         mPhase &= FRACTIONMASK;
     }
 
     /* Now, mix the processed sound data to the output. */
-    MixSamples(BufferOut, NumChannels, SamplesOut, mCurrentGains, mTargetGains,
-               maxi(SamplesToDo, 512), 0, SamplesToDo);
-}
-
-} // namespace
-
-struct FshifterStateFactory final : public EffectStateFactory {
-    EffectState *create() override;
-};
-
-EffectState *FshifterStateFactory::create()
-{ return new ALfshifterState{}; }
-
-EffectStateFactory *FshifterStateFactory_getFactory(void)
-{
-    static FshifterStateFactory FshifterFactory{};
-    return &FshifterFactory;
+    MixSamples(BufferOut, samplesOut, mCurrentGains, mTargetGains, maxi(samplesToDo, 512), 0,
+        samplesToDo);
 }
 
 
-void ALfshifter_setParamf(ALeffect *effect, ALCcontext *context, ALenum param, ALfloat val)
+void Fshifter_setParamf(EffectProps *props, ALCcontext *context, ALenum param, ALfloat val)
 {
-    ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_FREQUENCY_SHIFTER_FREQUENCY:
@@ -230,15 +216,11 @@ void ALfshifter_setParamf(ALeffect *effect, ALCcontext *context, ALenum param, A
             alSetError(context, AL_INVALID_ENUM, "Invalid frequency shifter float property 0x%04x", param);
     }
 }
+void Fshifter_setParamfv(EffectProps *props, ALCcontext *context, ALenum param, const ALfloat *vals)
+{ Fshifter_setParamf(props, context, param, vals[0]); }
 
-void ALfshifter_setParamfv(ALeffect *effect, ALCcontext *context, ALenum param, const ALfloat *vals)
+void Fshifter_setParami(EffectProps *props, ALCcontext *context, ALenum param, ALint val)
 {
-    ALfshifter_setParamf(effect, context, param, vals[0]);
-}
-
-void ALfshifter_setParami(ALeffect *effect, ALCcontext *context, ALenum param, ALint val)
-{
-    ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_FREQUENCY_SHIFTER_LEFT_DIRECTION:
@@ -257,14 +239,11 @@ void ALfshifter_setParami(ALeffect *effect, ALCcontext *context, ALenum param, A
             alSetError(context, AL_INVALID_ENUM, "Invalid frequency shifter integer property 0x%04x", param);
     }
 }
-void ALfshifter_setParamiv(ALeffect *effect, ALCcontext *context, ALenum param, const ALint *vals)
-{
-    ALfshifter_setParami(effect, context, param, vals[0]);
-}
+void Fshifter_setParamiv(EffectProps *props, ALCcontext *context, ALenum param, const ALint *vals)
+{ Fshifter_setParami(props, context, param, vals[0]); }
 
-void ALfshifter_getParami(const ALeffect *effect, ALCcontext *context, ALenum param, ALint *val)
+void Fshifter_getParami(const EffectProps *props, ALCcontext *context, ALenum param, ALint *val)
 {
-    const ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_FREQUENCY_SHIFTER_LEFT_DIRECTION:
@@ -277,15 +256,11 @@ void ALfshifter_getParami(const ALeffect *effect, ALCcontext *context, ALenum pa
             alSetError(context, AL_INVALID_ENUM, "Invalid frequency shifter integer property 0x%04x", param);
     }
 }
-void ALfshifter_getParamiv(const ALeffect *effect, ALCcontext *context, ALenum param, ALint *vals)
-{
-    ALfshifter_getParami(effect, context, param, vals);
-}
+void Fshifter_getParamiv(const EffectProps *props, ALCcontext *context, ALenum param, ALint *vals)
+{ Fshifter_getParami(props, context, param, vals); }
 
-void ALfshifter_getParamf(const ALeffect *effect, ALCcontext *context, ALenum param, ALfloat *val)
+void Fshifter_getParamf(const EffectProps *props, ALCcontext *context, ALenum param, ALfloat *val)
 {
-
-    const ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_FREQUENCY_SHIFTER_FREQUENCY:
@@ -295,12 +270,32 @@ void ALfshifter_getParamf(const ALeffect *effect, ALCcontext *context, ALenum pa
         default:
             alSetError(context, AL_INVALID_ENUM, "Invalid frequency shifter float property 0x%04x", param);
     }
-
 }
+void Fshifter_getParamfv(const EffectProps *props, ALCcontext *context, ALenum param, ALfloat *vals)
+{ Fshifter_getParamf(props, context, param, vals); }
 
-void ALfshifter_getParamfv(const ALeffect *effect, ALCcontext *context, ALenum param, ALfloat *vals)
+DEFINE_ALEFFECT_VTABLE(Fshifter);
+
+
+struct FshifterStateFactory final : public EffectStateFactory {
+    EffectState *create() override { return new FshifterState{}; }
+    EffectProps getDefaultProps() const noexcept override;
+    const EffectVtable *getEffectVtable() const noexcept override { return &Fshifter_vtable; }
+};
+
+EffectProps FshifterStateFactory::getDefaultProps() const noexcept
 {
-    ALfshifter_getParamf(effect, context, param, vals);
+    EffectProps props{};
+    props.Fshifter.Frequency      = AL_FREQUENCY_SHIFTER_DEFAULT_FREQUENCY;
+    props.Fshifter.LeftDirection  = AL_FREQUENCY_SHIFTER_DEFAULT_LEFT_DIRECTION;
+    props.Fshifter.RightDirection = AL_FREQUENCY_SHIFTER_DEFAULT_RIGHT_DIRECTION;
+    return props;
 }
 
-DEFINE_ALEFFECT_VTABLE(ALfshifter);
+} // namespace
+
+EffectStateFactory *FshifterStateFactory_getFactory()
+{
+    static FshifterStateFactory FshifterFactory{};
+    return &FshifterFactory;
+}

@@ -29,6 +29,8 @@
 #include "alcontext.h"
 #include "alu.h"
 #include "alError.h"
+#include "alexcpt.h"
+#include "alspan.h"
 
 #include "backends/base.h"
 
@@ -60,11 +62,13 @@ constexpr ALchar alBSinc24Resampler[] = "23rd order Sinc";
  * alcFunctions list.
  */
 extern "C" AL_API const ALchar* AL_APIENTRY alsoft_get_version(void)
+START_API_FUNC
 {
     const char *spoof{getenv("ALSOFT_SPOOF_VERSION")};
     if(spoof && spoof[0] != '\0') return spoof;
     return ALSOFT_VERSION;
 }
+END_API_FUNC
 
 #define DO_UPDATEPROPS() do {                                                 \
     if(!context->DeferUpdates.load(std::memory_order_acquire))                \
@@ -75,6 +79,7 @@ extern "C" AL_API const ALchar* AL_APIENTRY alsoft_get_version(void)
 
 
 AL_API ALvoid AL_APIENTRY alEnable(ALenum capability)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -91,8 +96,10 @@ AL_API ALvoid AL_APIENTRY alEnable(ALenum capability)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid enable property 0x%04x", capability);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alDisable(ALenum capability)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -109,8 +116,10 @@ AL_API ALvoid AL_APIENTRY alDisable(ALenum capability)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid disable property 0x%04x", capability);
     }
 }
+END_API_FUNC
 
 AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return AL_FALSE;
@@ -129,8 +138,10 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability)
 
     return value;
 }
+END_API_FUNC
 
 AL_API ALboolean AL_APIENTRY alGetBoolean(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return AL_FALSE;
@@ -184,8 +195,10 @@ AL_API ALboolean AL_APIENTRY alGetBoolean(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 AL_API ALdouble AL_APIENTRY alGetDouble(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return 0.0;
@@ -195,36 +208,36 @@ AL_API ALdouble AL_APIENTRY alGetDouble(ALenum pname)
     switch(pname)
     {
     case AL_DOPPLER_FACTOR:
-        value = (ALdouble)context->DopplerFactor;
+        value = static_cast<ALdouble>(context->DopplerFactor);
         break;
 
     case AL_DOPPLER_VELOCITY:
-        value = (ALdouble)context->DopplerVelocity;
+        value = static_cast<ALdouble>(context->DopplerVelocity);
         break;
 
     case AL_DISTANCE_MODEL:
-        value = (ALdouble)context->mDistanceModel;
+        value = static_cast<ALdouble>(context->mDistanceModel);
         break;
 
     case AL_SPEED_OF_SOUND:
-        value = (ALdouble)context->SpeedOfSound;
+        value = static_cast<ALdouble>(context->SpeedOfSound);
         break;
 
     case AL_DEFERRED_UPDATES_SOFT:
         if(context->DeferUpdates.load(std::memory_order_acquire))
-            value = (ALdouble)AL_TRUE;
+            value = static_cast<ALdouble>(AL_TRUE);
         break;
 
     case AL_GAIN_LIMIT_SOFT:
-        value = (ALdouble)GAIN_MIX_MAX/context->GainBoost;
+        value = static_cast<ALdouble>GAIN_MIX_MAX/context->GainBoost;
         break;
 
     case AL_NUM_RESAMPLERS_SOFT:
-        value = (ALdouble)(ResamplerMax + 1);
+        value = static_cast<ALdouble>(ResamplerMax + 1);
         break;
 
     case AL_DEFAULT_RESAMPLER_SOFT:
-        value = (ALdouble)ResamplerDefault;
+        value = static_cast<ALdouble>(ResamplerDefault);
         break;
 
     default:
@@ -233,8 +246,10 @@ AL_API ALdouble AL_APIENTRY alGetDouble(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 AL_API ALfloat AL_APIENTRY alGetFloat(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return 0.0f;
@@ -252,7 +267,7 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum pname)
         break;
 
     case AL_DISTANCE_MODEL:
-        value = (ALfloat)context->mDistanceModel;
+        value = static_cast<ALfloat>(context->mDistanceModel);
         break;
 
     case AL_SPEED_OF_SOUND:
@@ -261,7 +276,7 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum pname)
 
     case AL_DEFERRED_UPDATES_SOFT:
         if(context->DeferUpdates.load(std::memory_order_acquire))
-            value = (ALfloat)AL_TRUE;
+            value = static_cast<ALfloat>(AL_TRUE);
         break;
 
     case AL_GAIN_LIMIT_SOFT:
@@ -269,11 +284,11 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum pname)
         break;
 
     case AL_NUM_RESAMPLERS_SOFT:
-        value = (ALfloat)(ResamplerMax + 1);
+        value = static_cast<ALfloat>(ResamplerMax + 1);
         break;
 
     case AL_DEFAULT_RESAMPLER_SOFT:
-        value = (ALfloat)ResamplerDefault;
+        value = static_cast<ALfloat>(ResamplerDefault);
         break;
 
     default:
@@ -282,8 +297,10 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 AL_API ALint AL_APIENTRY alGetInteger(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return 0;
@@ -293,28 +310,28 @@ AL_API ALint AL_APIENTRY alGetInteger(ALenum pname)
     switch(pname)
     {
     case AL_DOPPLER_FACTOR:
-        value = (ALint)context->DopplerFactor;
+        value = static_cast<ALint>(context->DopplerFactor);
         break;
 
     case AL_DOPPLER_VELOCITY:
-        value = (ALint)context->DopplerVelocity;
+        value = static_cast<ALint>(context->DopplerVelocity);
         break;
 
     case AL_DISTANCE_MODEL:
-        value = (ALint)context->mDistanceModel;
+        value = static_cast<ALint>(context->mDistanceModel);
         break;
 
     case AL_SPEED_OF_SOUND:
-        value = (ALint)context->SpeedOfSound;
+        value = static_cast<ALint>(context->SpeedOfSound);
         break;
 
     case AL_DEFERRED_UPDATES_SOFT:
         if(context->DeferUpdates.load(std::memory_order_acquire))
-            value = (ALint)AL_TRUE;
+            value = static_cast<ALint>(AL_TRUE);
         break;
 
     case AL_GAIN_LIMIT_SOFT:
-        value = (ALint)(GAIN_MIX_MAX/context->GainBoost);
+        value = static_cast<ALint>(GAIN_MIX_MAX/context->GainBoost);
         break;
 
     case AL_NUM_RESAMPLERS_SOFT:
@@ -331,8 +348,10 @@ AL_API ALint AL_APIENTRY alGetInteger(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 extern "C" AL_API ALint64SOFT AL_APIENTRY alGetInteger64SOFT(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return 0;
@@ -380,8 +399,10 @@ extern "C" AL_API ALint64SOFT AL_APIENTRY alGetInteger64SOFT(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 AL_API void* AL_APIENTRY alGetPointerSOFT(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return nullptr;
@@ -404,8 +425,10 @@ AL_API void* AL_APIENTRY alGetPointerSOFT(ALenum pname)
 
     return value;
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetBooleanv(ALenum pname, ALboolean *values)
+START_API_FUNC
 {
     if(values)
     {
@@ -435,8 +458,10 @@ AL_API ALvoid AL_APIENTRY alGetBooleanv(ALenum pname, ALboolean *values)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid boolean-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetDoublev(ALenum pname, ALdouble *values)
+START_API_FUNC
 {
     if(values)
     {
@@ -466,8 +491,10 @@ AL_API ALvoid AL_APIENTRY alGetDoublev(ALenum pname, ALdouble *values)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid double-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetFloatv(ALenum pname, ALfloat *values)
+START_API_FUNC
 {
     if(values)
     {
@@ -497,8 +524,10 @@ AL_API ALvoid AL_APIENTRY alGetFloatv(ALenum pname, ALfloat *values)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid float-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetIntegerv(ALenum pname, ALint *values)
+START_API_FUNC
 {
     if(values)
     {
@@ -528,8 +557,10 @@ AL_API ALvoid AL_APIENTRY alGetIntegerv(ALenum pname, ALint *values)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid integer-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 extern "C" AL_API void AL_APIENTRY alGetInteger64vSOFT(ALenum pname, ALint64SOFT *values)
+START_API_FUNC
 {
     if(values)
     {
@@ -559,8 +590,10 @@ extern "C" AL_API void AL_APIENTRY alGetInteger64vSOFT(ALenum pname, ALint64SOFT
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid integer64-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 AL_API void AL_APIENTRY alGetPointervSOFT(ALenum pname, void **values)
+START_API_FUNC
 {
     if(values)
     {
@@ -584,8 +617,10 @@ AL_API void AL_APIENTRY alGetPointervSOFT(ALenum pname, void **values)
         alSetError(context.get(), AL_INVALID_VALUE, "Invalid pointer-vector property 0x%04x", pname);
     }
 }
+END_API_FUNC
 
 AL_API const ALchar* AL_APIENTRY alGetString(ALenum pname)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return nullptr;
@@ -638,8 +673,10 @@ AL_API const ALchar* AL_APIENTRY alGetString(ALenum pname)
     }
     return value;
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alDopplerFactor(ALfloat value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -653,8 +690,10 @@ AL_API ALvoid AL_APIENTRY alDopplerFactor(ALfloat value)
         DO_UPDATEPROPS();
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alDopplerVelocity(ALfloat value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -663,7 +702,7 @@ AL_API ALvoid AL_APIENTRY alDopplerVelocity(ALfloat value)
     {
         static constexpr ALCchar msg[] =
             "alDopplerVelocity is deprecated in AL1.1, use alSpeedOfSound";
-        const ALsizei msglen = (ALsizei)strlen(msg);
+        const ALsizei msglen = static_cast<ALsizei>(strlen(msg));
         std::lock_guard<std::mutex> _{context->EventCbLock};
         ALbitfieldSOFT enabledevts{context->EnabledEvts.load(std::memory_order_relaxed)};
         if((enabledevts&EventType_Deprecated) && context->EventCb)
@@ -680,8 +719,10 @@ AL_API ALvoid AL_APIENTRY alDopplerVelocity(ALfloat value)
         DO_UPDATEPROPS();
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alSpeedOfSound(ALfloat value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -695,8 +736,10 @@ AL_API ALvoid AL_APIENTRY alSpeedOfSound(ALfloat value)
         DO_UPDATEPROPS();
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alDistanceModel(ALenum value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -714,33 +757,39 @@ AL_API ALvoid AL_APIENTRY alDistanceModel(ALenum value)
             DO_UPDATEPROPS();
     }
 }
+END_API_FUNC
 
 
 AL_API ALvoid AL_APIENTRY alDeferUpdatesSOFT(void)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
 
     ALCcontext_DeferUpdates(context.get());
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alProcessUpdatesSOFT(void)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
 
     ALCcontext_ProcessUpdates(context.get());
 }
+END_API_FUNC
 
 
 AL_API const ALchar* AL_APIENTRY alGetStringiSOFT(ALenum pname, ALsizei index)
+START_API_FUNC
 {
     const char *ResamplerNames[] = {
         alPointResampler, alLinearResampler,
         alCubicResampler, alBSinc12Resampler,
         alBSinc24Resampler,
     };
-    static_assert(COUNTOF(ResamplerNames) == ResamplerMax+1, "Incorrect ResamplerNames list");
+    static_assert(al::size(ResamplerNames) == ResamplerMax+1, "Incorrect ResamplerNames list");
 
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return nullptr;
@@ -749,7 +798,7 @@ AL_API const ALchar* AL_APIENTRY alGetStringiSOFT(ALenum pname, ALsizei index)
     switch(pname)
     {
     case AL_RESAMPLER_NAME_SOFT:
-        if(index < 0 || (size_t)index >= COUNTOF(ResamplerNames))
+        if(index < 0 || static_cast<size_t>(index) >= al::size(ResamplerNames))
             alSetError(context.get(), AL_INVALID_VALUE, "Resampler name index %d out of range",
                        index);
         else
@@ -761,17 +810,18 @@ AL_API const ALchar* AL_APIENTRY alGetStringiSOFT(ALenum pname, ALsizei index)
     }
     return value;
 }
+END_API_FUNC
 
 
 void UpdateContextProps(ALCcontext *context)
 {
     /* Get an unused proprty container, or allocate a new one as needed. */
-    struct ALcontextProps *props{context->FreeContextProps.load(std::memory_order_acquire)};
+    ALcontextProps *props{context->FreeContextProps.load(std::memory_order_acquire)};
     if(!props)
         props = static_cast<ALcontextProps*>(al_calloc(16, sizeof(*props)));
     else
     {
-        struct ALcontextProps *next;
+        ALcontextProps *next;
         do {
             next = props->next.load(std::memory_order_relaxed);
         } while(context->FreeContextProps.compare_exchange_weak(props, next,

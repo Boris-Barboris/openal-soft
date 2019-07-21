@@ -8,10 +8,11 @@
 #include "inprogext.h"
 #include "atomic.h"
 #include "vector.h"
+#include "albyte.h"
 
 
 /* User formats */
-enum UserFmtType {
+enum UserFmtType : unsigned char {
     UserFmtUByte,
     UserFmtShort,
     UserFmtFloat,
@@ -21,7 +22,7 @@ enum UserFmtType {
     UserFmtIMA4,
     UserFmtMSADPCM,
 };
-enum UserFmtChannels {
+enum UserFmtChannels : unsigned char {
     UserFmtMono,
     UserFmtStereo,
     UserFmtRear,
@@ -33,16 +34,14 @@ enum UserFmtChannels {
     UserFmtBFormat3D, /* WXYZ */
 };
 
-ALsizei BytesFromUserFmt(enum UserFmtType type);
-ALsizei ChannelsFromUserFmt(enum UserFmtChannels chans);
-inline ALsizei FrameSizeFromUserFmt(enum UserFmtChannels chans, enum UserFmtType type)
-{
-    return ChannelsFromUserFmt(chans) * BytesFromUserFmt(type);
-}
+ALsizei BytesFromUserFmt(UserFmtType type);
+ALsizei ChannelsFromUserFmt(UserFmtChannels chans);
+inline ALsizei FrameSizeFromUserFmt(UserFmtChannels chans, UserFmtType type)
+{ return ChannelsFromUserFmt(chans) * BytesFromUserFmt(type); }
 
 
 /* Storable formats */
-enum FmtType {
+enum FmtType : unsigned char {
     FmtUByte  = UserFmtUByte,
     FmtShort  = UserFmtShort,
     FmtFloat  = UserFmtFloat,
@@ -50,7 +49,7 @@ enum FmtType {
     FmtMulaw  = UserFmtMulaw,
     FmtAlaw   = UserFmtAlaw,
 };
-enum FmtChannels {
+enum FmtChannels : unsigned char {
     FmtMono   = UserFmtMono,
     FmtStereo = UserFmtStereo,
     FmtRear   = UserFmtRear,
@@ -81,26 +80,23 @@ template<>
 struct FmtTypeTraits<FmtAlaw> { using Type = ALubyte; };
 
 
-ALsizei BytesFromFmt(enum FmtType type);
-ALsizei ChannelsFromFmt(enum FmtChannels chans);
-inline ALsizei FrameSizeFromFmt(enum FmtChannels chans, enum FmtType type)
-{
-    return ChannelsFromFmt(chans) * BytesFromFmt(type);
-}
+ALsizei BytesFromFmt(FmtType type);
+ALsizei ChannelsFromFmt(FmtChannels chans);
+inline ALsizei FrameSizeFromFmt(FmtChannels chans, FmtType type)
+{ return ChannelsFromFmt(chans) * BytesFromFmt(type); }
 
 
 struct ALbuffer {
-    al::vector<ALbyte,16> mData;
+    al::vector<al::byte,16> mData;
 
     ALsizei Frequency{0};
     ALbitfieldSOFT Access{0u};
     ALsizei SampleLen{0};
 
-    enum FmtChannels FmtChannels{};
-    enum FmtType     FmtType{};
-    ALsizei BytesAlloc{0};
+    FmtChannels mFmtChannels{};
+    FmtType     mFmtType{};
 
-    enum UserFmtType OriginalType{};
+    UserFmtType OriginalType{};
     ALsizei OriginalSize{0};
     ALsizei OriginalAlign{0};
 

@@ -20,7 +20,7 @@
 
 #include "config.h"
 
-#include <stdlib.h>
+#include <cstdlib>
 
 #include <algorithm>
 
@@ -29,6 +29,7 @@
 #include "alu.h"
 #include "alFilter.h"
 #include "alError.h"
+#include "alexcpt.h"
 
 
 namespace {
@@ -276,7 +277,7 @@ ALfilter *AllocFilter(ALCcontext *context)
         { return entry.FreeMask != 0; }
     );
 
-    auto lidx = std::distance(device->FilterList.begin(), sublist);
+    auto lidx = static_cast<ALsizei>(std::distance(device->FilterList.begin(), sublist));
     ALfilter *filter{nullptr};
     ALsizei slidx{0};
     if(LIKELY(sublist != device->FilterList.end()))
@@ -292,17 +293,17 @@ ALfilter *AllocFilter(ALCcontext *context)
         if(UNLIKELY(device->FilterList.size() >= 1<<25))
         {
             alSetError(context, AL_OUT_OF_MEMORY, "Too many filters allocated");
-            return NULL;
+            return nullptr;
         }
         device->FilterList.emplace_back();
         sublist = device->FilterList.end() - 1;
-        sublist->FreeMask = ~U64(0);
+        sublist->FreeMask = ~0_u64;
         sublist->Filters = static_cast<ALfilter*>(al_calloc(16, sizeof(ALfilter)*64));
         if(UNLIKELY(!sublist->Filters))
         {
             device->FilterList.pop_back();
             alSetError(context, AL_OUT_OF_MEMORY, "Failed to allocate filter batch");
-            return NULL;
+            return nullptr;
         }
 
         slidx = 0;
@@ -315,7 +316,7 @@ ALfilter *AllocFilter(ALCcontext *context)
     /* Add 1 to avoid filter ID 0. */
     filter->id = ((lidx<<6) | slidx) + 1;
 
-    sublist->FreeMask &= ~(U64(1)<<slidx);
+    sublist->FreeMask &= ~(1_u64 << slidx);
 
     return filter;
 }
@@ -326,9 +327,9 @@ void FreeFilter(ALCdevice *device, ALfilter *filter)
     ALsizei lidx = id >> 6;
     ALsizei slidx = id & 0x3f;
 
-    filter->~ALfilter();
+    al::destroy_at(filter);
 
-    device->FilterList[lidx].FreeMask |= U64(1) << slidx;
+    device->FilterList[lidx].FreeMask |= 1_u64 << slidx;
 }
 
 
@@ -340,7 +341,7 @@ inline ALfilter *LookupFilter(ALCdevice *device, ALuint id)
     if(UNLIKELY(lidx >= device->FilterList.size()))
         return nullptr;
     FilterSubList &sublist = device->FilterList[lidx];
-    if(UNLIKELY(sublist.FreeMask & (U64(1)<<slidx)))
+    if(UNLIKELY(sublist.FreeMask & (1_u64 << slidx)))
         return nullptr;
     return sublist.Filters + slidx;
 }
@@ -348,6 +349,7 @@ inline ALfilter *LookupFilter(ALCdevice *device, ALuint id)
 } // namespace
 
 AL_API ALvoid AL_APIENTRY alGenFilters(ALsizei n, ALuint *filters)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -375,7 +377,7 @@ AL_API ALvoid AL_APIENTRY alGenFilters(ALsizei n, ALuint *filters)
             ALfilter *filter = AllocFilter(context.get());
             if(!filter)
             {
-                alDeleteFilters(ids.size(), ids.data());
+                alDeleteFilters(static_cast<ALsizei>(ids.size()), ids.data());
                 return;
             }
 
@@ -384,8 +386,10 @@ AL_API ALvoid AL_APIENTRY alGenFilters(ALsizei n, ALuint *filters)
         std::copy(ids.begin(), ids.end(), filters);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alDeleteFilters(ALsizei n, const ALuint *filters)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -428,8 +432,10 @@ AL_API ALvoid AL_APIENTRY alDeleteFilters(ALsizei n, const ALuint *filters)
         );
     }
 }
+END_API_FUNC
 
 AL_API ALboolean AL_APIENTRY alIsFilter(ALuint filter)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(LIKELY(context))
@@ -441,9 +447,11 @@ AL_API ALboolean AL_APIENTRY alIsFilter(ALuint filter)
     }
     return AL_FALSE;
 }
+END_API_FUNC
 
 
 AL_API ALvoid AL_APIENTRY alFilteri(ALuint filter, ALenum param, ALint value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -471,8 +479,10 @@ AL_API ALvoid AL_APIENTRY alFilteri(ALuint filter, ALenum param, ALint value)
         }
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alFilteriv(ALuint filter, ALenum param, const ALint *values)
+START_API_FUNC
 {
     switch(param)
     {
@@ -496,8 +506,10 @@ AL_API ALvoid AL_APIENTRY alFilteriv(ALuint filter, ALenum param, const ALint *v
         ALfilter_setParamiv(alfilt, context.get(), param, values);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alFilterf(ALuint filter, ALenum param, ALfloat value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -514,8 +526,10 @@ AL_API ALvoid AL_APIENTRY alFilterf(ALuint filter, ALenum param, ALfloat value)
         ALfilter_setParamf(alfilt, context.get(), param, value);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alFilterfv(ALuint filter, ALenum param, const ALfloat *values)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -532,8 +546,10 @@ AL_API ALvoid AL_APIENTRY alFilterfv(ALuint filter, ALenum param, const ALfloat 
         ALfilter_setParamfv(alfilt, context.get(), param, values);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetFilteri(ALuint filter, ALenum param, ALint *value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -555,8 +571,10 @@ AL_API ALvoid AL_APIENTRY alGetFilteri(ALuint filter, ALenum param, ALint *value
         }
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetFilteriv(ALuint filter, ALenum param, ALint *values)
+START_API_FUNC
 {
     switch(param)
     {
@@ -580,8 +598,10 @@ AL_API ALvoid AL_APIENTRY alGetFilteriv(ALuint filter, ALenum param, ALint *valu
         ALfilter_getParamiv(alfilt, context.get(), param, values);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetFilterf(ALuint filter, ALenum param, ALfloat *value)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -598,8 +618,10 @@ AL_API ALvoid AL_APIENTRY alGetFilterf(ALuint filter, ALenum param, ALfloat *val
         ALfilter_getParamf(alfilt, context.get(), param, value);
     }
 }
+END_API_FUNC
 
 AL_API ALvoid AL_APIENTRY alGetFilterfv(ALuint filter, ALenum param, ALfloat *values)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context)) return;
@@ -616,16 +638,17 @@ AL_API ALvoid AL_APIENTRY alGetFilterfv(ALuint filter, ALenum param, ALfloat *va
         ALfilter_getParamfv(alfilt, context.get(), param, values);
     }
 }
+END_API_FUNC
 
 
 FilterSubList::~FilterSubList()
 {
-    ALuint64 usemask = ~FreeMask;
+    uint64_t usemask{~FreeMask};
     while(usemask)
     {
         ALsizei idx = CTZ64(usemask);
-        Filters[idx].~ALfilter();
-        usemask &= ~(U64(1) << idx);
+        al::destroy_at(Filters+idx);
+        usemask &= ~(1_u64 << idx);
     }
     FreeMask = ~usemask;
     al_free(Filters);

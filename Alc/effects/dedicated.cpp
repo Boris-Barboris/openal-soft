@@ -20,7 +20,7 @@
 
 #include "config.h"
 
-#include <stdlib.h>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 
@@ -31,39 +31,38 @@
 #include "alu.h"
 
 
-struct ALdedicatedState final : public EffectState {
+namespace {
+
+struct DedicatedState final : public EffectState {
     ALfloat mCurrentGains[MAX_OUTPUT_CHANNELS];
     ALfloat mTargetGains[MAX_OUTPUT_CHANNELS];
 
 
-    ALboolean deviceUpdate(ALCdevice *device) override;
-    void update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props) override;
-    void process(ALsizei samplesToDo, const ALfloat (*RESTRICT samplesIn)[BUFFERSIZE], ALfloat (*RESTRICT samplesOut)[BUFFERSIZE], ALsizei numChannels) override;
+    ALboolean deviceUpdate(const ALCdevice *device) override;
+    void update(const ALCcontext *context, const ALeffectslot *slot, const EffectProps *props, const EffectTarget target) override;
+    void process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei numInput, const al::span<FloatBufferLine> samplesOut) override;
 
-    DEF_NEWDEL(ALdedicatedState)
+    DEF_NEWDEL(DedicatedState)
 };
 
-ALboolean ALdedicatedState::deviceUpdate(ALCdevice *UNUSED(device))
+ALboolean DedicatedState::deviceUpdate(const ALCdevice *UNUSED(device))
 {
     std::fill(std::begin(mCurrentGains), std::end(mCurrentGains), 0.0f);
     return AL_TRUE;
 }
 
-void ALdedicatedState::update(const ALCcontext *context, const ALeffectslot *slot, const ALeffectProps *props)
+void DedicatedState::update(const ALCcontext* UNUSED(context), const ALeffectslot *slot, const EffectProps *props, const EffectTarget target)
 {
-    const ALCdevice *device = context->Device;
-    ALfloat Gain;
-
     std::fill(std::begin(mTargetGains), std::end(mTargetGains), 0.0f);
 
-    Gain = slot->Params.Gain * props->Dedicated.Gain;
+    const ALfloat Gain{slot->Params.Gain * props->Dedicated.Gain};
+
     if(slot->Params.EffectType == AL_EFFECT_DEDICATED_LOW_FREQUENCY_EFFECT)
     {
-        int idx;
-        if((idx=GetChannelIdxByName(&device->RealOut, LFE)) != -1)
+        const int idx{!target.RealOut ? -1 : GetChannelIdxByName(*target.RealOut, LFE)};
+        if(idx != -1)
         {
-            mOutBuffer = device->RealOut.Buffer;
-            mOutChannels = device->RealOut.NumChannels;
+            mOutTarget = target.RealOut->Buffer;
             mTargetGains[idx] = Gain;
         }
     }
@@ -71,53 +70,36 @@ void ALdedicatedState::update(const ALCcontext *context, const ALeffectslot *slo
     {
         /* Dialog goes to the front-center speaker if it exists, otherwise it
          * plays from the front-center location. */
-        int idx{GetChannelIdxByName(&device->RealOut, FrontCenter)};
+        const int idx{!target.RealOut ? -1 : GetChannelIdxByName(*target.RealOut, FrontCenter)};
         if(idx != -1)
         {
-            mOutBuffer = device->RealOut.Buffer;
-            mOutChannels = device->RealOut.NumChannels;
+            mOutTarget = target.RealOut->Buffer;
             mTargetGains[idx] = Gain;
         }
         else
         {
-            ALfloat coeffs[MAX_AMBI_COEFFS];
-            CalcAngleCoeffs(0.0f, 0.0f, 0.0f, coeffs);
+            ALfloat coeffs[MAX_AMBI_CHANNELS];
+            CalcDirectionCoeffs({0.0f, 0.0f, -1.0f}, 0.0f, coeffs);
 
-            mOutBuffer = device->Dry.Buffer;
-            mOutChannels = device->Dry.NumChannels;
-            ComputePanGains(&device->Dry, coeffs, Gain, mTargetGains);
+            mOutTarget = target.Main->Buffer;
+            ComputePanGains(target.Main, coeffs, Gain, mTargetGains);
         }
     }
 }
 
-void ALdedicatedState::process(ALsizei SamplesToDo, const ALfloat (*RESTRICT SamplesIn)[BUFFERSIZE], ALfloat (*RESTRICT SamplesOut)[BUFFERSIZE], ALsizei NumChannels)
+void DedicatedState::process(const ALsizei samplesToDo, const FloatBufferLine *RESTRICT samplesIn, const ALsizei /*numInput*/, const al::span<FloatBufferLine> samplesOut)
 {
-    MixSamples(SamplesIn[0], NumChannels, SamplesOut, mCurrentGains,
-               mTargetGains, SamplesToDo, 0, SamplesToDo);
+    MixSamples(samplesIn[0].data(), samplesOut, mCurrentGains, mTargetGains, samplesToDo, 0,
+        samplesToDo);
 }
 
 
-struct DedicatedStateFactory final : public EffectStateFactory {
-    EffectState *create() override;
-};
-
-EffectState *DedicatedStateFactory::create()
-{ return new ALdedicatedState{}; }
-
-EffectStateFactory *DedicatedStateFactory_getFactory(void)
-{
-    static DedicatedStateFactory DedicatedFactory{};
-    return &DedicatedFactory;
-}
-
-
-void ALdedicated_setParami(ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALint UNUSED(val))
+void Dedicated_setParami(EffectProps*, ALCcontext *context, ALenum param, ALint)
 { alSetError(context, AL_INVALID_ENUM, "Invalid dedicated integer property 0x%04x", param); }
-void ALdedicated_setParamiv(ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, const ALint *UNUSED(vals))
+void Dedicated_setParamiv(EffectProps*, ALCcontext *context, ALenum param, const ALint*)
 { alSetError(context, AL_INVALID_ENUM, "Invalid dedicated integer-vector property 0x%04x", param); }
-void ALdedicated_setParamf(ALeffect *effect, ALCcontext *context, ALenum param, ALfloat val)
+void Dedicated_setParamf(EffectProps *props, ALCcontext *context, ALenum param, ALfloat val)
 {
-    ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_DEDICATED_GAIN:
@@ -130,16 +112,15 @@ void ALdedicated_setParamf(ALeffect *effect, ALCcontext *context, ALenum param, 
             alSetError(context, AL_INVALID_ENUM, "Invalid dedicated float property 0x%04x", param);
     }
 }
-void ALdedicated_setParamfv(ALeffect *effect, ALCcontext *context, ALenum param, const ALfloat *vals)
-{ ALdedicated_setParamf(effect, context, param, vals[0]); }
+void Dedicated_setParamfv(EffectProps *props, ALCcontext *context, ALenum param, const ALfloat *vals)
+{ Dedicated_setParamf(props, context, param, vals[0]); }
 
-void ALdedicated_getParami(const ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALint *UNUSED(val))
+void Dedicated_getParami(const EffectProps*, ALCcontext *context, ALenum param, ALint*)
 { alSetError(context, AL_INVALID_ENUM, "Invalid dedicated integer property 0x%04x", param); }
-void ALdedicated_getParamiv(const ALeffect *UNUSED(effect), ALCcontext *context, ALenum param, ALint *UNUSED(vals))
+void Dedicated_getParamiv(const EffectProps*, ALCcontext *context, ALenum param, ALint*)
 { alSetError(context, AL_INVALID_ENUM, "Invalid dedicated integer-vector property 0x%04x", param); }
-void ALdedicated_getParamf(const ALeffect *effect, ALCcontext *context, ALenum param, ALfloat *val)
+void Dedicated_getParamf(const EffectProps *props, ALCcontext *context, ALenum param, ALfloat *val)
 {
-    const ALeffectProps *props = &effect->Props;
     switch(param)
     {
         case AL_DEDICATED_GAIN:
@@ -150,7 +131,29 @@ void ALdedicated_getParamf(const ALeffect *effect, ALCcontext *context, ALenum p
             alSetError(context, AL_INVALID_ENUM, "Invalid dedicated float property 0x%04x", param);
     }
 }
-void ALdedicated_getParamfv(const ALeffect *effect, ALCcontext *context, ALenum param, ALfloat *vals)
-{ ALdedicated_getParamf(effect, context, param, vals); }
+void Dedicated_getParamfv(const EffectProps *props, ALCcontext *context, ALenum param, ALfloat *vals)
+{ Dedicated_getParamf(props, context, param, vals); }
 
-DEFINE_ALEFFECT_VTABLE(ALdedicated);
+DEFINE_ALEFFECT_VTABLE(Dedicated);
+
+
+struct DedicatedStateFactory final : public EffectStateFactory {
+    EffectState *create() override { return new DedicatedState{}; }
+    EffectProps getDefaultProps() const noexcept override;
+    const EffectVtable *getEffectVtable() const noexcept override { return &Dedicated_vtable; }
+};
+
+EffectProps DedicatedStateFactory::getDefaultProps() const noexcept
+{
+    EffectProps props{};
+    props.Dedicated.Gain = 1.0f;
+    return props;
+}
+
+} // namespace
+
+EffectStateFactory *DedicatedStateFactory_getFactory()
+{
+    static DedicatedStateFactory DedicatedFactory{};
+    return &DedicatedFactory;
+}

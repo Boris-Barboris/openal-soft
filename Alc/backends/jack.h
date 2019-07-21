@@ -6,13 +6,12 @@
 struct JackBackendFactory final : public BackendFactory {
 public:
     bool init() override;
-    void deinit() override;
 
-    bool querySupport(ALCbackend_Type type) override;
+    bool querySupport(BackendType type) override;
 
-    void probe(enum DevProbe type, std::string *outnames) override;
+    void probe(DevProbe type, std::string *outnames) override;
 
-    ALCbackend *createBackend(ALCdevice *device, ALCbackend_Type type) override;
+    BackendPtr createBackend(ALCdevice *device, BackendType type) override;
 
     static BackendFactory &getFactory();
 };

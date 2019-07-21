@@ -53,7 +53,7 @@
      </rect>
     </property>
     <property name="currentIndex">
-     <number>5</number>
+     <number>0</number>
     </property>
     <widget class="QWidget" name="tab_3">
      <attribute name="title">
@@ -131,8 +131,8 @@ to stereo output.</string>
        <rect>
         <x>380</x>
         <y>20</y>
-        <width>80</width>
-        <height>20</height>
+        <width>95</width>
+        <height>31</height>
        </rect>
       </property>
       <property name="toolTip">
@@ -283,9 +283,9 @@ mixed and being heard.</string>
         <widget class="QLabel" name="label_11">
          <property name="geometry">
           <rect>
-           <x>20</x>
+           <x>60</x>
            <y>0</y>
-           <width>201</width>
+           <width>161</width>
            <height>21</height>
           </rect>
          </property>
@@ -299,9 +299,9 @@ mixed and being heard.</string>
         <widget class="QSlider" name="periodCountSlider">
          <property name="geometry">
           <rect>
-           <x>80</x>
+           <x>99</x>
            <y>20</y>
-           <width>160</width>
+           <width>141</width>
            <height>21</height>
           </rect>
          </property>
@@ -336,7 +336,7 @@ mixed and being heard.</string>
         <widget class="QLineEdit" name="periodCountEdit">
          <property name="geometry">
           <rect>
-           <x>20</x>
+           <x>40</x>
            <y>20</y>
            <width>51</width>
            <height>21</height>
@@ -365,24 +365,24 @@ frames needed for each mixing update.</string>
           <rect>
            <x>60</x>
            <y>20</y>
-           <width>160</width>
+           <width>191</width>
            <height>21</height>
           </rect>
          </property>
          <property name="minimum">
-          <number>0</number>
+          <number>63</number>
          </property>
          <property name="maximum">
           <number>8192</number>
          </property>
          <property name="singleStep">
-          <number>64</number>
+          <number>1</number>
          </property>
          <property name="pageStep">
           <number>1024</number>
          </property>
          <property name="value">
-          <number>0</number>
+          <number>63</number>
          </property>
          <property name="tracking">
           <bool>true</bool>
@@ -423,7 +423,7 @@ frames needed for each mixing update.</string>
           </rect>
          </property>
          <property name="placeholderText">
-          <string>1024</string>
+          <string>20ms</string>
          </property>
         </widget>
        </widget>
@@ -655,7 +655,7 @@ configuration file.</string>
       <property name="text">
        <string>Distance Compensation:</string>
       </property>
-      <property name="checked">
+      <property name="tristate">
        <bool>true</bool>
       </property>
      </widget>
@@ -847,8 +847,7 @@ creates a more realistic perception of sound distance.
 Note that the effect may be stronger or weaker than
 intended if the application doesn't use or specify an
 appropriate unit scale, or if incorrect speaker distances
-are set in the decoder configuration file. Requires High
-Quality Mode to be enabled.</string>
+are set in the decoder configuration file.</string>
       </property>
       <property name="layoutDirection">
        <enum>Qt::RightToLeft</enum>
@@ -856,7 +855,7 @@ Quality Mode to be enabled.</string>
       <property name="text">
        <string>Near-Field Effects:</string>
       </property>
-      <property name="checked">
+      <property name="tristate">
        <bool>true</bool>
       </property>
      </widget>
@@ -1123,6 +1122,77 @@ application or system to determine if it should be used.</string>
        <string>The default HRTF to use if the application doesn't request one.</string>
       </property>
      </widget>
+     <widget class="QGroupBox" name="groupBox_9">
+      <property name="geometry">
+       <rect>
+        <x>50</x>
+        <y>90</y>
+        <width>441</width>
+        <height>81</height>
+       </rect>
+      </property>
+      <property name="title">
+       <string>HRTF Render Method</string>
+      </property>
+      <widget class="QLabel" name="label_31">
+       <property name="geometry">
+        <rect>
+         <x>20</x>
+         <y>30</y>
+         <width>51</width>
+         <height>21</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>Speed</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+       </property>
+      </widget>
+      <widget class="QLabel" name="label_32">
+       <property name="geometry">
+        <rect>
+         <x>340</x>
+         <y>30</y>
+         <width>51</width>
+         <height>21</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>Quality</string>
+       </property>
+      </widget>
+      <widget class="QSlider" name="hrtfmodeSlider">
+       <property name="geometry">
+        <rect>
+         <x>80</x>
+         <y>30</y>
+         <width>251</width>
+         <height>21</height>
+        </rect>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+      <widget class="QLabel" name="hrtfmodeLabel">
+       <property name="geometry">
+        <rect>
+         <x>50</x>
+         <y>50</y>
+         <width>321</width>
+         <height>21</height>
+        </rect>
+       </property>
+       <property name="text">
+        <string>Default</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </widget>
     </widget>
     <widget class="QWidget" name="tab">
      <attribute name="title">
@@ -1184,6 +1254,9 @@ application or system to determine if it should be used.</string>
         <width>421</width>
         <height>361</height>
        </rect>
+      </property>
+      <property name="currentIndex">
+       <number>0</number>
       </property>
       <widget class="QWidget" name="page">
        <widget class="QCheckBox" name="backendCheckBox">
@@ -1279,7 +1352,7 @@ is not already running.</string>
         <property name="text">
          <string>AutoSpawn Server</string>
         </property>
-        <property name="checked">
+        <property name="tristate">
          <bool>true</bool>
         </property>
        </widget>
@@ -1301,6 +1374,9 @@ to match the new device.</string>
         <property name="text">
          <string>Allow Moving Streams</string>
         </property>
+        <property name="tristate">
+         <bool>true</bool>
+        </property>
        </widget>
        <widget class="QCheckBox" name="pulseFixRateCheckBox">
         <property name="geometry">
@@ -1318,6 +1394,32 @@ rate to match the PulseAudio device.</string>
         <property name="text">
          <string>Fix Sample Rate</string>
         </property>
+        <property name="tristate">
+         <bool>true</bool>
+        </property>
+       </widget>
+       <widget class="QCheckBox" name="pulseAdjLatencyCheckBox">
+        <property name="geometry">
+         <rect>
+          <x>20</x>
+          <y>100</y>
+          <width>111</width>
+          <height>21</height>
+         </rect>
+        </property>
+        <property name="toolTip">
+         <string>Attempts to adjust the overall latency of device
+playback. Note that this may have adverse effects
+on the resulting internal buffer sizes and mixing
+updates, leading to performance problems and
+drop-outs.</string>
+        </property>
+        <property name="text">
+         <string>Adjust Latency</string>
+        </property>
+        <property name="tristate">
+         <bool>true</bool>
+        </property>
        </widget>
       </widget>
       <widget class="QWidget" name="page_7">
@@ -1332,6 +1434,9 @@ rate to match the PulseAudio device.</string>
         </property>
         <property name="text">
          <string>AutoSpawn Server</string>
+        </property>
+        <property name="tristate">
+         <bool>true</bool>
         </property>
        </widget>
        <widget class="QGroupBox" name="groupBox_7">
@@ -1474,6 +1579,9 @@ resample pass on top of OpenAL's resampler.</string>
         <property name="text">
          <string>Allow Resampler</string>
         </property>
+        <property name="tristate">
+         <bool>true</bool>
+        </property>
        </widget>
        <widget class="QCheckBox" name="alsaMmapCheckBox">
         <property name="geometry">
@@ -1492,7 +1600,7 @@ during updates.</string>
         <property name="text">
          <string>MMap Buffer</string>
         </property>
-        <property name="checked">
+        <property name="tristate">
          <bool>true</bool>
         </property>
        </widget>
@@ -2178,8 +2286,8 @@ added by the ALC_EXT_DEDICATED extension.</string>
        <rect>
         <x>160</x>
         <y>20</y>
-        <width>108</width>
-        <height>20</height>
+        <width>129</width>
+        <height>31</height>
        </rect>
       </property>
       <property name="sizeAdjustPolicy">
@@ -2348,7 +2456,7 @@ added by the ALC_EXT_DEDICATED extension.</string>
      <x>0</x>
      <y>0</y>
      <width>564</width>
-     <height>21</height>
+     <height>29</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">

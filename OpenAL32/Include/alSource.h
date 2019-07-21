@@ -1,6 +1,8 @@
 #ifndef _AL_SOURCE_H_
 #define _AL_SOURCE_H_
 
+#include <array>
+
 #include "alMain.h"
 #include "alu.h"
 #include "hrtf.h"
@@ -9,23 +11,26 @@
 
 #define DEFAULT_SENDS  2
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 struct ALbuffer;
 struct ALsource;
+struct ALeffectslot;
 
 
-typedef struct ALbufferlistitem {
+struct ALbufferlistitem {
     std::atomic<ALbufferlistitem*> next;
     ALsizei max_samples;
     ALsizei num_buffers;
-    struct ALbuffer *buffers[];
-} ALbufferlistitem;
+    ALbuffer *buffers[];
+
+    static constexpr size_t Sizeof(size_t num_buffers) noexcept
+    {
+        return maxz(offsetof(ALbufferlistitem, buffers) + sizeof(ALbuffer*)*num_buffers,
+            sizeof(ALbufferlistitem));
+    }
+};
 
 
-typedef struct ALsource {
+struct ALsource {
     /** Source properties. */
     ALfloat   Pitch;
     ALfloat   Gain;
@@ -37,16 +42,17 @@ typedef struct ALsource {
     ALfloat   RefDistance;
     ALfloat   MaxDistance;
     ALfloat   RolloffFactor;
-    ALfloat   Position[3];
-    ALfloat   Velocity[3];
-    ALfloat   Direction[3];
-    ALfloat   Orientation[2][3];
+    std::array<ALfloat,3> Position;
+    std::array<ALfloat,3> Velocity;
+    std::array<ALfloat,3> Direction;
+    std::array<ALfloat,3> OrientAt;
+    std::array<ALfloat,3> OrientUp;
     ALboolean HeadRelative;
     ALboolean Looping;
     DistanceModel mDistanceModel;
-    enum Resampler Resampler;
+    Resampler mResampler;
     ALboolean DirectChannels;
-    enum SpatializeMode Spatialize;
+    SpatializeMode mSpatialize;
 
     ALboolean DryGainHFAuto;
     ALboolean WetGainAuto;
@@ -60,7 +66,7 @@ typedef struct ALsource {
     /* NOTE: Stereo pan angles are specified in radians, counter-clockwise
      * rather than clockwise.
      */
-    ALfloat StereoPan[2];
+    std::array<ALfloat,2> StereoPan;
 
     ALfloat Radius;
 
@@ -73,7 +79,7 @@ typedef struct ALsource {
         ALfloat LFReference;
     } Direct;
     struct SendData {
-        struct ALeffectslot *Slot;
+        ALeffectslot *Slot;
         ALfloat Gain;
         ALfloat GainHF;
         ALfloat HFReference;
@@ -98,7 +104,7 @@ typedef struct ALsource {
     /** Source Buffer Queue head. */
     ALbufferlistitem *queue;
 
-    std::atomic_flag PropsClean{true};
+    std::atomic_flag PropsClean;
 
     /* Index into the context's Voices array. Lazily updated, only checked and
      * reset when looking up the voice.
@@ -114,12 +120,8 @@ typedef struct ALsource {
 
     ALsource(const ALsource&) = delete;
     ALsource& operator=(const ALsource&) = delete;
-} ALsource;
+};
 
 void UpdateAllSourceProps(ALCcontext *context);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

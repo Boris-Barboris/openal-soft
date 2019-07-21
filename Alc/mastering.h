@@ -1,10 +1,12 @@
 #ifndef MASTERING_H
 #define MASTERING_H
 
+#include <memory>
+
 #include "AL/al.h"
 
 #include "almalloc.h"
-/* For BUFFERSIZE. */
+/* For FloatBufferLine/BUFFERSIZE. */
 #include "alMain.h"
 
 
@@ -21,45 +23,49 @@ struct SlidingHold;
  *   http://c4dm.eecs.qmul.ac.uk/audioengineering/compressors/
  */
 struct Compressor {
-    ALsizei NumChans;
-    ALuint SampleRate;
+    ALuint mNumChans{0u};
+    ALuint mSampleRate{0u};
 
     struct {
-        ALuint Knee : 1;
-        ALuint Attack : 1;
-        ALuint Release : 1;
-        ALuint PostGain : 1;
-        ALuint Declip : 1;
-    } Auto;
+        bool Knee : 1;
+        bool Attack : 1;
+        bool Release : 1;
+        bool PostGain : 1;
+        bool Declip : 1;
+    } mAuto{};
 
-    ALsizei LookAhead;
+    ALsizei mLookAhead{0};
 
-    ALfloat PreGain;
-    ALfloat PostGain;
+    ALfloat mPreGain{0.0f};
+    ALfloat mPostGain{0.0f};
 
-    ALfloat Threshold;
-    ALfloat Slope;
-    ALfloat Knee;
+    ALfloat mThreshold{0.0f};
+    ALfloat mSlope{0.0f};
+    ALfloat mKnee{0.0f};
 
-    ALfloat Attack;
-    ALfloat Release;
+    ALfloat mAttack{0.0f};
+    ALfloat mRelease{0.0f};
 
-    alignas(16) ALfloat SideChain[2*BUFFERSIZE];
-    alignas(16) ALfloat CrestFactor[BUFFERSIZE];
+    alignas(16) ALfloat mSideChain[2*BUFFERSIZE]{};
+    alignas(16) ALfloat mCrestFactor[BUFFERSIZE]{};
 
-    SlidingHold *Hold;
-    ALfloat (*Delay)[BUFFERSIZE];
-    ALsizei DelayIndex;
+    SlidingHold *mHold{nullptr};
+    FloatBufferLine *mDelay{nullptr};
 
-    ALfloat CrestCoeff;
-    ALfloat GainEstimate;
-    ALfloat AdaptCoeff;
+    ALfloat mCrestCoeff{0.0f};
+    ALfloat mGainEstimate{0.0f};
+    ALfloat mAdaptCoeff{0.0f};
 
-    ALfloat LastPeakSq;
-    ALfloat LastRmsSq;
-    ALfloat LastRelease;
-    ALfloat LastAttack;
-    ALfloat LastGainDev;
+    ALfloat mLastPeakSq{0.0f};
+    ALfloat mLastRmsSq{0.0f};
+    ALfloat mLastRelease{0.0f};
+    ALfloat mLastAttack{0.0f};
+    ALfloat mLastGainDev{0.0f};
+
+
+    ~Compressor();
+    void process(const ALsizei SamplesToDo, FloatBufferLine *OutBuffer);
+    ALsizei getLookAhead() const noexcept { return mLookAhead; }
 
     DEF_PLACE_NEWDEL()
 };
@@ -88,18 +94,11 @@ struct Compressor {
  *   ReleaseTimeMin - Release time (in seconds).  Acts as a maximum when
  *                    automating release time.
  */
-Compressor* CompressorInit(const ALsizei NumChans, const ALuint SampleRate,
-    const ALboolean AutoKnee, const ALboolean AutoAttack,
-    const ALboolean AutoRelease, const ALboolean AutoPostGain,
-    const ALboolean AutoDeclip, const ALfloat LookAheadTime,
-    const ALfloat HoldTime, const ALfloat PreGainDb,
-    const ALfloat PostGainDb, const ALfloat ThresholdDb,
-    const ALfloat Ratio, const ALfloat KneeDb,
-    const ALfloat AttackTime, const ALfloat ReleaseTime);
-
-void ApplyCompression(struct Compressor *Comp, const ALsizei SamplesToDo,
-                      ALfloat (*RESTRICT OutBuffer)[BUFFERSIZE]);
-
-ALsizei GetCompressorLookAhead(const struct Compressor *Comp);
+std::unique_ptr<Compressor> CompressorInit(const ALuint NumChans, const ALuint SampleRate,
+    const ALboolean AutoKnee, const ALboolean AutoAttack, const ALboolean AutoRelease,
+    const ALboolean AutoPostGain, const ALboolean AutoDeclip, const ALfloat LookAheadTime,
+    const ALfloat HoldTime, const ALfloat PreGainDb, const ALfloat PostGainDb,
+    const ALfloat ThresholdDb, const ALfloat Ratio, const ALfloat KneeDb, const ALfloat AttackTime,
+    const ALfloat ReleaseTime);
 
 #endif /* MASTERING_H */

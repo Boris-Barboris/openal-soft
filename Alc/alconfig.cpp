@@ -45,6 +45,7 @@
 
 #include "alMain.h"
 #include "alconfig.h"
+#include "logging.h"
 #include "compat.h"
 
 
@@ -53,11 +54,6 @@ namespace {
 struct ConfigEntry {
     std::string key;
     std::string value;
-
-    template<typename T0, typename T1>
-    ConfigEntry(T0&& key_, T1&& val_)
-      : key{std::forward<T0>(key_)}, value{std::forward<T1>(val_)}
-    { }
 };
 al::vector<ConfigEntry> ConfOpts;
 
@@ -92,7 +88,7 @@ std:: string expdup(const char *str)
         {
             const char *next = std::strchr(str, '$');
             addstr = str;
-            addstrlen = next ? (size_t)(next-str) : std::strlen(str);
+            addstrlen = next ? static_cast<size_t>(next-str) : std::strlen(str);
 
             str += addstrlen;
         }
@@ -103,7 +99,7 @@ std:: string expdup(const char *str)
             {
                 const char *next = std::strchr(str+1, '$');
                 addstr = str;
-                addstrlen = next ? (size_t)(next-str) : std::strlen(str);
+                addstrlen = next ? static_cast<size_t>(next-str) : std::strlen(str);
 
                 str += addstrlen;
             }
@@ -271,7 +267,7 @@ void LoadConfigFromFile(std::istream &f)
             ent->value = expdup(value);
         else
         {
-            ConfOpts.emplace_back(std::move(fullKey), expdup(value));
+            ConfOpts.emplace_back(ConfigEntry{std::move(fullKey), expdup(value)});
             ent = ConfOpts.end()-1;
         }
 
@@ -284,7 +280,7 @@ void LoadConfigFromFile(std::istream &f)
 
 
 #ifdef _WIN32
-void ReadALConfig(void) noexcept
+void ReadALConfig()
 {
     WCHAR buffer[MAX_PATH];
     if(SHGetSpecialFolderPathW(nullptr, buffer, CSIDL_APPDATA, FALSE) != FALSE)
@@ -298,12 +294,12 @@ void ReadALConfig(void) noexcept
             LoadConfigFromFile(f);
     }
 
-    PathNamePair ppath = GetProcBinary();
-    if(!ppath.path.empty())
+    std::string ppath{GetProcBinary().path};
+    if(!ppath.empty())
     {
-        ppath.path += "\\alsoft.ini";
-        TRACE("Loading config %s...\n", ppath.path.c_str());
-        al::ifstream f{ppath.path.c_str()};
+        ppath += "\\alsoft.ini";
+        TRACE("Loading config %s...\n", ppath.c_str());
+        al::ifstream f{ppath};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -320,7 +316,7 @@ void ReadALConfig(void) noexcept
     }
 }
 #else
-void ReadALConfig(void) noexcept
+void ReadALConfig()
 {
     const char *str{"/etc/openal/alsoft.conf"};
 
@@ -421,14 +417,14 @@ void ReadALConfig(void) noexcept
             LoadConfigFromFile(f);
     }
 
-    PathNamePair ppath = GetProcBinary();
-    if(!ppath.path.empty())
+    std::string ppath{GetProcBinary().path};
+    if(!ppath.empty())
     {
-        if(ppath.path.back() != '/') ppath.path += "/alsoft.conf";
-        else ppath.path += "alsoft.conf";
+        if(ppath.back() != '/') ppath += "/alsoft.conf";
+        else ppath += "alsoft.conf";
 
-        TRACE("Loading config %s...\n", ppath.path.c_str());
-        al::ifstream f{ppath.path};
+        TRACE("Loading config %s...\n", ppath.c_str());
+        al::ifstream f{ppath};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -442,11 +438,6 @@ void ReadALConfig(void) noexcept
     }
 }
 #endif
-
-void FreeALConfig(void)
-{
-    ConfOpts.clear();
-}
 
 const char *GetConfigValue(const char *devName, const char *blockName, const char *keyName, const char *def)
 {
@@ -501,50 +492,46 @@ int ConfigValueExists(const char *devName, const char *blockName, const char *ke
     return val[0] != 0;
 }
 
-int ConfigValueStr(const char *devName, const char *blockName, const char *keyName, const char **ret)
+al::optional<std::string> ConfigValueStr(const char *devName, const char *blockName, const char *keyName)
 {
     const char *val = GetConfigValue(devName, blockName, keyName, "");
-    if(!val[0]) return 0;
+    if(!val[0]) return al::nullopt;
 
-    *ret = val;
-    return 1;
+    return al::make_optional<std::string>(val);
 }
 
-int ConfigValueInt(const char *devName, const char *blockName, const char *keyName, int *ret)
+al::optional<int> ConfigValueInt(const char *devName, const char *blockName, const char *keyName)
 {
     const char *val = GetConfigValue(devName, blockName, keyName, "");
-    if(!val[0]) return 0;
+    if(!val[0]) return al::nullopt;
 
-    *ret = std::strtol(val, nullptr, 0);
-    return 1;
+    return al::make_optional(static_cast<int>(std::strtol(val, nullptr, 0)));
 }
 
-int ConfigValueUInt(const char *devName, const char *blockName, const char *keyName, unsigned int *ret)
+al::optional<unsigned int> ConfigValueUInt(const char *devName, const char *blockName, const char *keyName)
 {
     const char *val = GetConfigValue(devName, blockName, keyName, "");
-    if(!val[0]) return 0;
+    if(!val[0]) return al::nullopt;
 
-    *ret = std::strtoul(val, nullptr, 0);
-    return 1;
+    return al::make_optional(static_cast<unsigned int>(std::strtoul(val, nullptr, 0)));
 }
 
-int ConfigValueFloat(const char *devName, const char *blockName, const char *keyName, float *ret)
+al::optional<float> ConfigValueFloat(const char *devName, const char *blockName, const char *keyName)
 {
     const char *val = GetConfigValue(devName, blockName, keyName, "");
-    if(!val[0]) return 0;
+    if(!val[0]) return al::nullopt;
 
-    *ret = std::strtof(val, nullptr);
-    return 1;
+    return al::make_optional(std::strtof(val, nullptr));
 }
 
-int ConfigValueBool(const char *devName, const char *blockName, const char *keyName, int *ret)
+al::optional<bool> ConfigValueBool(const char *devName, const char *blockName, const char *keyName)
 {
     const char *val = GetConfigValue(devName, blockName, keyName, "");
-    if(!val[0]) return 0;
+    if(!val[0]) return al::nullopt;
 
-    *ret = (strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0 ||
-            strcasecmp(val, "on") == 0 || atoi(val) != 0);
-    return 1;
+    return al::make_optional(
+        strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0 ||
+        strcasecmp(val, "on") == 0 || atoi(val) != 0);
 }
 
 int GetConfigValueBool(const char *devName, const char *blockName, const char *keyName, int def)

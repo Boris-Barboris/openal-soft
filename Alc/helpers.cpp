@@ -28,11 +28,11 @@
 
 #include "config.h"
 
-#include <stdlib.h>
-#include <time.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <ctype.h>
+#include <cstdlib>
+#include <ctime>
+#include <cerrno>
+#include <cstdarg>
+#include <cctype>
 #ifdef HAVE_MALLOC_H
 #include <malloc.h>
 #endif
@@ -89,11 +89,14 @@ DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_GUID, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x
 #ifdef HAVE_CPUID_H
 #include <cpuid.h>
 #endif
+#ifdef HAVE_SSE_INTRINSICS
+#include <xmmintrin.h>
+#endif
 #ifdef HAVE_SYS_SYSCONF_H
 #include <sys/sysconf.h>
 #endif
 #ifdef HAVE_FLOAT_H
-#include <float.h>
+#include <cfloat>
 #endif
 #ifdef HAVE_IEEEFP_H
 #include <ieeefp.h>
@@ -125,13 +128,13 @@ DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_GUID, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x
 
 #if defined(HAVE_GCC_GET_CPUID) && (defined(__i386__) || defined(__x86_64__) || \
                                     defined(_M_IX86) || defined(_M_X64))
-typedef unsigned int reg_type;
+using reg_type = unsigned int;
 static inline void get_cpuid(int f, reg_type *regs)
 { __get_cpuid(f, &regs[0], &regs[1], &regs[2], &regs[3]); }
 #define CAN_GET_CPUID
 #elif defined(HAVE_CPUID_INTRINSIC) && (defined(__i386__) || defined(__x86_64__) || \
                                         defined(_M_IX86) || defined(_M_X64))
-typedef int reg_type;
+using reg_type = int;
 static inline void get_cpuid(int f, reg_type *regs)
 { (__cpuid)(regs, f); }
 #define CAN_GET_CPUID
@@ -203,45 +206,35 @@ void FillCPUCaps(int capfilter)
 #endif
 #endif
 #ifdef HAVE_NEON
-    FILE *file = fopen("/proc/cpuinfo", "rt");
-    if(!file)
+    al::ifstream file{"/proc/cpuinfo"};
+    if(!file.is_open())
         ERR("Failed to open /proc/cpuinfo, cannot check for NEON support\n");
     else
     {
         std::string features;
-        char buf[256];
 
-        while(fgets(buf, sizeof(buf), file) != nullptr)
+        auto getline = [](std::istream &f, std::string &output) -> bool
         {
-            if(strncmp(buf, "Features\t:", 10) != 0)
-                continue;
+            while(f.good() && f.peek() == '\n')
+                f.ignore();
+            return std::getline(f, output) && !output.empty();
 
-            features = buf+10;
-            while(features.back() != '\n')
-            {
-                if(fgets(buf, sizeof(buf), file) == nullptr)
-                    break;
-                features += buf;
-            }
-            break;
+        };
+        while(getline(file, features))
+        {
+            if(features.compare(0, 10, "Features\t:", 10) == 0)
+                break;
         }
-        fclose(file);
-        file = nullptr;
+        file.close();
 
-        if(!features.empty())
+        size_t extpos{9};
+        while((extpos=features.find("neon", extpos+1)) != std::string::npos)
         {
-            const char *str = features.c_str();
-            while(isspace(str[0])) ++str;
-
-            TRACE("Got features string:%s\n", str);
-            while((str=strstr(str, "neon")) != nullptr)
+            if((extpos == 0 || std::isspace(features[extpos-1])) &&
+                (extpos+4 == features.length() || std::isspace(features[extpos+4])))
             {
-                if(isspace(*(str-1)) && (str[4] == 0 || isspace(str[4])))
-                {
-                    caps |= CPU_CAP_NEON;
-                    break;
-                }
-                ++str;
+                caps |= CPU_CAP_NEON;
+                break;
             }
         }
     }
@@ -259,9 +252,17 @@ void FillCPUCaps(int capfilter)
 }
 
 
-FPUCtl::FPUCtl() noexcept
+FPUCtl::FPUCtl()
 {
-#if defined(__GNUC__) && defined(HAVE_SSE)
+#if defined(HAVE_SSE_INTRINSICS)
+    this->sse_state = _mm_getcsr();
+    unsigned int sseState = this->sse_state;
+    sseState |= 0x8000; /* set flush-to-zero */
+    sseState |= 0x0040; /* set denormals-are-zero */
+    _mm_setcsr(sseState);
+
+#elif defined(__GNUC__) && defined(HAVE_SSE)
+
     if((CPUCapFlags&CPU_CAP_SSE))
     {
         __asm__ __volatile__("stmxcsr %0" : "=m" (*&this->sse_state));
@@ -271,38 +272,22 @@ FPUCtl::FPUCtl() noexcept
             sseState |= 0x0040; /* set denormals-are-zero */
         __asm__ __volatile__("ldmxcsr %0" : : "m" (*&sseState));
     }
-
-#elif defined(HAVE___CONTROL87_2)
-
-    __control87_2(0, 0, &this->state, &this->sse_state);
-    _control87(_DN_FLUSH, _MCW_DN);
-
-#elif defined(HAVE__CONTROLFP)
-
-    this->state = _controlfp(0, 0);
-    _controlfp(_DN_FLUSH, _MCW_DN);
 #endif
 
     this->in_mode = true;
 }
 
-void FPUCtl::leave() noexcept
+void FPUCtl::leave()
 {
     if(!this->in_mode) return;
 
-#if defined(__GNUC__) && defined(HAVE_SSE)
+#if defined(HAVE_SSE_INTRINSICS)
+    _mm_setcsr(this->sse_state);
+
+#elif defined(__GNUC__) && defined(HAVE_SSE)
+
     if((CPUCapFlags&CPU_CAP_SSE))
         __asm__ __volatile__("ldmxcsr %0" : : "m" (*&this->sse_state));
-
-#elif defined(HAVE___CONTROL87_2)
-
-    unsigned int mode;
-    __control87_2(this->state, _MCW_DN, &mode, nullptr);
-    __control87_2(this->sse_state, _MCW_DN, nullptr, &mode);
-
-#elif defined(HAVE__CONTROLFP)
-
-    _controlfp(this->state, _MCW_DN);
 #endif
     this->in_mode = false;
 }
@@ -310,13 +295,152 @@ void FPUCtl::leave() noexcept
 
 #ifdef _WIN32
 
-PathNamePair GetProcBinary()
+namespace al {
+
+auto filebuf::underflow() -> int_type
 {
-    PathNamePair ret;
+    if(mFile != INVALID_HANDLE_VALUE && gptr() == egptr())
+    {
+        // Read in the next chunk of data, and set the pointers on success
+        DWORD got{};
+        if(ReadFile(mFile, mBuffer.data(), (DWORD)mBuffer.size(), &got, nullptr))
+            setg(mBuffer.data(), mBuffer.data(), mBuffer.data()+got);
+    }
+    if(gptr() == egptr())
+        return traits_type::eof();
+    return traits_type::to_int_type(*gptr());
+}
+
+auto filebuf::seekoff(off_type offset, std::ios_base::seekdir whence, std::ios_base::openmode mode) -> pos_type
+{
+    if(mFile == INVALID_HANDLE_VALUE || (mode&std::ios_base::out) || !(mode&std::ios_base::in))
+        return traits_type::eof();
+
+    LARGE_INTEGER fpos{};
+    switch(whence)
+    {
+        case std::ios_base::beg:
+            fpos.QuadPart = offset;
+            if(!SetFilePointerEx(mFile, fpos, &fpos, FILE_BEGIN))
+                return traits_type::eof();
+            break;
+
+        case std::ios_base::cur:
+            // If the offset remains in the current buffer range, just
+            // update the pointer.
+            if((offset >= 0 && offset < off_type(egptr()-gptr())) ||
+                (offset < 0 && -offset <= off_type(gptr()-eback())))
+            {
+                // Get the current file offset to report the correct read
+                // offset.
+                fpos.QuadPart = 0;
+                if(!SetFilePointerEx(mFile, fpos, &fpos, FILE_CURRENT))
+                    return traits_type::eof();
+                setg(eback(), gptr()+offset, egptr());
+                return fpos.QuadPart - off_type(egptr()-gptr());
+            }
+            // Need to offset for the file offset being at egptr() while
+            // the requested offset is relative to gptr().
+            offset -= off_type(egptr()-gptr());
+            fpos.QuadPart = offset;
+            if(!SetFilePointerEx(mFile, fpos, &fpos, FILE_CURRENT))
+                return traits_type::eof();
+            break;
+
+        case std::ios_base::end:
+            fpos.QuadPart = offset;
+            if(!SetFilePointerEx(mFile, fpos, &fpos, FILE_END))
+                return traits_type::eof();
+            break;
+
+        default:
+            return traits_type::eof();
+    }
+    setg(nullptr, nullptr, nullptr);
+    return fpos.QuadPart;
+}
+
+auto filebuf::seekpos(pos_type pos, std::ios_base::openmode mode) -> pos_type
+{
+    // Simplified version of seekoff
+    if(mFile == INVALID_HANDLE_VALUE || (mode&std::ios_base::out) || !(mode&std::ios_base::in))
+        return traits_type::eof();
+
+    LARGE_INTEGER fpos{};
+    fpos.QuadPart = pos;
+    if(!SetFilePointerEx(mFile, fpos, &fpos, FILE_BEGIN))
+        return traits_type::eof();
+
+    setg(nullptr, nullptr, nullptr);
+    return fpos.QuadPart;
+}
+
+filebuf::~filebuf()
+{
+    if(mFile != INVALID_HANDLE_VALUE)
+        CloseHandle(mFile);
+    mFile = INVALID_HANDLE_VALUE;
+}
+
+bool filebuf::open(const wchar_t *filename, std::ios_base::openmode mode)
+{
+    if((mode&std::ios_base::out) || !(mode&std::ios_base::in))
+        return false;
+    HANDLE f{CreateFileW(filename, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if(f == INVALID_HANDLE_VALUE) return false;
+
+    if(mFile != INVALID_HANDLE_VALUE)
+        CloseHandle(mFile);
+    mFile = f;
+
+    setg(nullptr, nullptr, nullptr);
+    return true;
+}
+bool filebuf::open(const char *filename, std::ios_base::openmode mode)
+{
+    std::wstring wname{utf8_to_wstr(filename)};
+    return open(wname.c_str(), mode);
+}
+
+
+ifstream::ifstream(const wchar_t *filename, std::ios_base::openmode mode)
+  : std::istream{nullptr}
+{
+    init(&mStreamBuf);
+
+    // Set the failbit if the file failed to open.
+    if((mode&std::ios_base::out) || !mStreamBuf.open(filename, mode|std::ios_base::in))
+        clear(failbit);
+}
+
+ifstream::ifstream(const char *filename, std::ios_base::openmode mode)
+  : std::istream{nullptr}
+{
+    init(&mStreamBuf);
+
+    // Set the failbit if the file failed to open.
+    if((mode&std::ios_base::out) || !mStreamBuf.open(filename, mode|std::ios_base::in))
+        clear(failbit);
+}
+
+/* This is only here to ensure the compiler doesn't define an implicit
+ * destructor, which it tries to automatically inline and subsequently complain
+ * it can't inline without excessive code growth.
+ */
+ifstream::~ifstream() { }
+
+} // namespace al
+
+const PathNamePair &GetProcBinary()
+{
+    static PathNamePair ret;
+    if(!ret.fname.empty() || !ret.path.empty())
+        return ret;
 
     al::vector<WCHAR> fullpath(256);
     DWORD len;
-    while((len=GetModuleFileNameW(nullptr, fullpath.data(), fullpath.size())) == fullpath.size())
+    while((len=GetModuleFileNameW(nullptr, fullpath.data(), static_cast<DWORD>(fullpath.size()))) == fullpath.size())
         fullpath.resize(fullpath.size() << 1);
     if(len == 0)
     {
@@ -339,7 +463,7 @@ PathNamePair GetProcBinary()
     else
         ret.fname = wstr_to_utf8(fullpath.data());
 
-    TRACE("Got: %s, %s\n", ret.path.c_str(), ret.fname.c_str());
+    TRACE("Got binary: %s, %s\n", ret.path.c_str(), ret.fname.c_str());
     return ret;
 }
 
@@ -359,19 +483,28 @@ void *GetSymbol(void *handle, const char *name)
 }
 
 
-void al_print(const char *type, const char *func, const char *fmt, ...)
+void al_print(FILE *logfile, const char *fmt, ...)
 {
-    char str[1024];
-    va_list ap;
+    al::vector<char> dynmsg;
+    char stcmsg[256];
+    char *str{stcmsg};
 
-    va_start(ap, fmt);
-    vsnprintf(str, sizeof(str), fmt, ap);
-    va_end(ap);
-    str[sizeof(str)-1] = 0;
+    va_list args, args2;
+    va_start(args, fmt);
+    va_copy(args2, args);
+    int msglen{std::vsnprintf(str, sizeof(stcmsg), fmt, args)};
+    if(UNLIKELY(msglen >= 0 && static_cast<size_t>(msglen) >= sizeof(stcmsg)))
+    {
+        dynmsg.resize(static_cast<size_t>(msglen) + 1u);
+        str = dynmsg.data();
+        msglen = std::vsnprintf(str, dynmsg.size(), fmt, args2);
+    }
+    va_end(args2);
+    va_end(args);
 
     std::wstring wstr{utf8_to_wstr(str)};
-    fprintf(LogFile, "AL lib: %s %s: %ls", type, func, wstr.c_str());
-    fflush(LogFile);
+    fprintf(logfile, "%ls", wstr.c_str());
+    fflush(logfile);
 }
 
 
@@ -477,11 +610,13 @@ void SetRTPriority(void)
 
 #else
 
-PathNamePair GetProcBinary()
+const PathNamePair &GetProcBinary()
 {
-    PathNamePair ret;
-    al::vector<char> pathname;
+    static PathNamePair ret;
+    if(!ret.fname.empty() || !ret.path.empty())
+        return ret;
 
+    al::vector<char> pathname;
 #ifdef __FreeBSD__
     size_t pathlen;
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
@@ -527,7 +662,7 @@ PathNamePair GetProcBinary()
             len = readlink(selfname, pathname.data(), pathname.size());
         }
 
-        while(len > 0 && (size_t)len == pathname.size())
+        while(len > 0 && static_cast<size_t>(len) == pathname.size())
         {
             pathname.resize(pathname.size() << 1);
             len = readlink(selfname, pathname.data(), pathname.size());
@@ -552,7 +687,7 @@ PathNamePair GetProcBinary()
     else
         ret.fname = std::string(pathname.cbegin(), pathname.cend());
 
-    TRACE("Got: %s, %s\n", ret.path.c_str(), ret.fname.c_str());
+    TRACE("Got binary: %s, %s\n", ret.path.c_str(), ret.fname.c_str());
     return ret;
 }
 
@@ -584,16 +719,15 @@ void *GetSymbol(void *handle, const char *name)
 
 #endif /* HAVE_DLFCN_H */
 
-void al_print(const char *type, const char *func, const char *fmt, ...)
+void al_print(FILE *logfile, const char *fmt, ...)
 {
     va_list ap;
 
     va_start(ap, fmt);
-    fprintf(LogFile, "AL lib: %s %s: ", type, func);
-    vfprintf(LogFile, fmt, ap);
+    vfprintf(logfile, fmt, ap);
     va_end(ap);
 
-    fflush(LogFile);
+    fflush(logfile);
 }
 
 
@@ -709,7 +843,7 @@ al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
     return results;
 }
 
-void SetRTPriority(void)
+void SetRTPriority()
 {
     bool failed = false;
 #if defined(HAVE_PTHREAD_SETSCHEDPARAM) && !defined(__OpenBSD__)

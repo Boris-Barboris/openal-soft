@@ -20,8 +20,9 @@
 
 #include "config.h"
 
-#include <signal.h>
-#include <stdarg.h>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
 
 #ifdef HAVE_WINDOWS_H
 #define WIN32_LEAN_AND_MEAN
@@ -31,33 +32,31 @@
 #include "alMain.h"
 #include "alcontext.h"
 #include "alError.h"
+#include "alexcpt.h"
 
-ALboolean TrapALError = AL_FALSE;
+bool TrapALError{false};
 
 void alSetError(ALCcontext *context, ALenum errorCode, const char *msg, ...)
 {
-    char message[1024]{};
+    auto message = al::vector<char>(256);
 
-    va_list args;
+    va_list args, args2;
     va_start(args, msg);
-    int msglen{vsnprintf(message, sizeof(message), msg, args)};
+    va_copy(args2, args);
+    int msglen{std::vsnprintf(message.data(), message.size(), msg, args)};
+    if(msglen >= 0 && static_cast<size_t>(msglen) >= message.size())
+    {
+        message.resize(static_cast<size_t>(msglen) + 1u);
+        msglen = std::vsnprintf(message.data(), message.size(), msg, args2);
+    }
+    va_end(args2);
     va_end(args);
 
-    if(msglen < 0 || (size_t)msglen >= sizeof(message))
-    {
-        message[sizeof(message)-1] = 0;
-        msglen = (int)strlen(message);
-    }
-    if(msglen > 0)
-        msg = message;
-    else
-    {
-        msg = "<internal error constructing message>";
-        msglen = (int)strlen(msg);
-    }
+    if(msglen >= 0) msg = message.data();
+    else msg = "<internal error constructing message>";
+    msglen = static_cast<int>(strlen(msg));
 
-    WARN("Error generated on context %p, code 0x%04x, \"%s\"\n",
-         context, errorCode, message);
+    WARN("Error generated on context %p, code 0x%04x, \"%s\"\n", context, errorCode, msg);
     if(TrapALError)
     {
 #ifdef _WIN32
@@ -82,6 +81,7 @@ void alSetError(ALCcontext *context, ALenum errorCode, const char *msg, ...)
 }
 
 AL_API ALenum AL_APIENTRY alGetError(void)
+START_API_FUNC
 {
     ContextRef context{GetContextRef()};
     if(UNLIKELY(!context))
@@ -102,3 +102,4 @@ AL_API ALenum AL_APIENTRY alGetError(void)
 
     return context->LastError.exchange(AL_NO_ERROR);
 }
+END_API_FUNC

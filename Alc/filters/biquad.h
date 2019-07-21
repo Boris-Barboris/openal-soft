@@ -1,7 +1,8 @@
-#ifndef ALC_FILTER_H
-#define ALC_FILTER_H
+#ifndef FILTERS_BIQUAD_H
+#define FILTERS_BIQUAD_H
 
 #include <cmath>
+#include <utility>
 
 #include "AL/al.h"
 #include "math_defs.h"
@@ -33,13 +34,14 @@ enum class BiquadType {
     BandPass,
 };
 
-class BiquadFilter {
+template<typename Real>
+class BiquadFilterR {
     /* Last two delayed components for direct form II. */
-    float z1{0.0f}, z2{0.0f};
+    Real z1{0.0f}, z2{0.0f};
     /* Transfer function coefficients "b" (numerator) */
-    float b0{1.0f}, b1{0.0f}, b2{0.0f};
+    Real b0{1.0f}, b1{0.0f}, b2{0.0f};
     /* Transfer function coefficients "a" (denominator; a0 is pre-applied). */
-    float a1{0.0f}, a2{0.0f};
+    Real a1{0.0f}, a2{0.0f};
 
 public:
     void clear() noexcept { z1 = z2 = 0.0f; }
@@ -55,12 +57,12 @@ public:
      *               BandPass filter types, or the cutoff frequency for the
      *               LowPass and HighPass filter types.
      * \param rcpQ The reciprocal of the Q coefficient for the filter's
-     *             transition band. Can be generated from calc_rcpQ_from_slope
-     *             or calc_rcpQ_from_bandwidth as needed.
+     *             transition band. Can be generated from rcpQFromSlope or
+     *             rcpQFromBandwidth as needed.
      */
-    void setParams(BiquadType type, float gain, float f0norm, float rcpQ);
+    void setParams(BiquadType type, Real gain, Real f0norm, Real rcpQ);
 
-    void copyParamsFrom(const BiquadFilter &other)
+    void copyParamsFrom(const BiquadFilterR &other)
     {
         b0 = other.b0;
         b1 = other.b1;
@@ -70,56 +72,43 @@ public:
     }
 
 
-    void process(float *RESTRICT dst, const float *RESTRICT src, int numsamples);
-
-    void passthru(int numsamples) noexcept
-    {
-        if(LIKELY(numsamples >= 2))
-        {
-            z1 = 0.0f;
-            z2 = 0.0f;
-        }
-        else if(numsamples == 1)
-        {
-            z1 = z2;
-            z2 = 0.0f;
-        }
-    }
+    void process(Real *dst, const Real *src, int numsamples);
 
     /* Rather hacky. It's just here to support "manual" processing. */
-    std::pair<float,float> getComponents() const noexcept
+    std::pair<Real,Real> getComponents() const noexcept
     { return {z1, z2}; }
-    void setComponents(float z1_, float z2_) noexcept
+    void setComponents(Real z1_, Real z2_) noexcept
     { z1 = z1_; z2 = z2_; }
-    float processOne(const float in, float &z1_, float &z2_) const noexcept
+    Real processOne(const Real in, Real &z1_, Real &z2_) const noexcept
     {
-        float out{in*b0 + z1_};
+        Real out{in*b0 + z1_};
         z1_ = in*b1 - out*a1 + z2_;
         z2_ = in*b2 - out*a2;
         return out;
     }
+
+    /**
+     * Calculates the rcpQ (i.e. 1/Q) coefficient for shelving filters, using
+     * the reference gain and shelf slope parameter.
+     * \param gain 0 < gain
+     * \param slope 0 < slope <= 1
+     */
+    static Real rcpQFromSlope(Real gain, Real slope)
+    { return std::sqrt((gain + 1.0f/gain)*(1.0f/slope - 1.0f) + 2.0f); }
+
+    /**
+     * Calculates the rcpQ (i.e. 1/Q) coefficient for filters, using the
+     * normalized reference frequency and bandwidth.
+     * \param f0norm 0 < f0norm < 0.5.
+     * \param bandwidth 0 < bandwidth
+     */
+    static Real rcpQFromBandwidth(Real f0norm, Real bandwidth)
+    {
+        const Real w0{al::MathDefs<Real>::Tau() * f0norm};
+        return 2.0f*std::sinh(std::log(Real{2.0f})/2.0f*bandwidth*w0/std::sin(w0));
+    }
 };
 
-/**
- * Calculates the rcpQ (i.e. 1/Q) coefficient for shelving filters, using the
- * reference gain and shelf slope parameter.
- * \param gain 0 < gain
- * \param slope 0 < slope <= 1
- */
-inline float calc_rcpQ_from_slope(float gain, float slope)
-{
-    return std::sqrt((gain + 1.0f/gain)*(1.0f/slope - 1.0f) + 2.0f);
-}
-/**
- * Calculates the rcpQ (i.e. 1/Q) coefficient for filters, using the normalized
- * reference frequency and bandwidth.
- * \param f0norm 0 < f0norm < 0.5.
- * \param bandwidth 0 < bandwidth
- */
-inline ALfloat calc_rcpQ_from_bandwidth(float f0norm, float bandwidth)
-{
-    float w0 = F_TAU * f0norm;
-    return 2.0f*std::sinh(std::log(2.0f)/2.0f*bandwidth*w0/std::sin(w0));
-}
+using BiquadFilter = BiquadFilterR<float>;
 
-#endif /* ALC_FILTER_H */
+#endif /* FILTERS_BIQUAD_H */
